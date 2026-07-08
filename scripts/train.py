@@ -42,6 +42,7 @@ from src.data.pipeline import prepare_features, build_eval_test_cases, augment_c
 from src.evaluation.metrics import score_test_cases
 from src.evaluation.sampling import build_test_cases
 from src.utils.geo import haversine_torch
+from src.utils.device import get_device
 from src.models.two_tower import (
     TEMPORAL_DIM,
     PREFERENCE_DIM,
@@ -93,13 +94,7 @@ def main():
     restaurant_group_names = set(args.restaurant_groups)
     user_group_names = set(args.user_groups)
 
-    if torch.cuda.is_available():
-        device = torch.device("cuda")
-    elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-        device = torch.device("mps")
-    else:
-        device = torch.device("cpu")
-    print(f"Device: {device}")
+    device = get_device(verbose=True)
 
     data_dir = Path(args.data_dir)
     save_dir = Path(args.save_dir)
