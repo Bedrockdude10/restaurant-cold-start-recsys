@@ -23,26 +23,32 @@ produces a meaningful embedding. The model is trained and evaluated on the
 
 Ranking is over one held-out positive plus **same-city** sampled negatives
 (~100 candidates; random floor ≈ 5%). Metrics are **Hit@5** and **NDCG@10**.
-Values are the best two-tower variant per split; baselines are non-personalized.
+Values are the best two-tower variant per split, compared against Random, Popularity, and
+**DropoutNet** (Volkovs et al., 2017) — a purpose-built cold-start baseline, run on the
+*same* frozen test cases (see [Baselines](#baselines)).
 
-| Split | Cases | Two-Tower Hit@5 | Two-Tower NDCG@10 | Random (H@5 / N@10) | Popularity (H@5 / N@10) |
-|-------|------:|----------------:|------------------:|:-------------------:|:-----------------------:|
-| **Warm** | 80,057 | 28.7 | 24.3 | 5.4 / 5.0 | 27.2 / 23.2 |
-| **Cold-Restaurant** | 1,369 | 10.0 | 9.3 | 4.1 / 3.8 | **0.0 / 0.0** |
-| **Cold-User** | 1,732 | 31.8 | 29.0 | 6.2 / 5.4 | 27.1 / 22.8 |
+| Split | Cases | Random H@5 / N@10 | Popularity H@5 / N@10 | DropoutNet H@5 / N@10 | Two-Tower H@5 / N@10 |
+|-------|------:|:---:|:---:|:---:|:---:|
+| **Warm** | 80,057 | 5.4 / 5.0 | 27.2 / 23.2 | 18.0 / 15.7 | **28.7 / 24.3** |
+| **Cold-Restaurant** | 1,369 | 4.1 / 3.8 | 0.0 / 0.0 | **12.5 / 9.8** | 10.0 / 9.3 |
+| **Cold-User** | 1,732 | 6.2 / 5.4 | 27.1 / 22.8 | 11.8 / 10.6 | **31.8 / 29.0** |
 
-*(all numbers in %)*
+*(all numbers in %; best per split in bold)*
 
 **How to read this honestly:**
 
-- **Cold-restaurant is the headline win.** Popularity scores **exactly 0** — held-out
-  restaurants have no training review counts by construction — while the two-tower
-  model reaches 10.0% Hit@5 (≈2.4× random) purely from metadata and temporal profile.
-- **Cold-user is a clear win**: +27% *relative* NDCG@10 over Popularity (29.0 vs 22.8).
-- **Warm-start is a near-tie, not a blowout.** The best variant edges Popularity by
-  ~1.1 pp NDCG@10 / ~1.5 pp Hit@5; the *full* model is essentially at parity with
-  Popularity on warm. Popularity is a very strong baseline in the dense regime, and we
-  report this plainly. The model's value is concentrated where popularity has no signal.
+- **Cold restaurants — content wins, and so does DropoutNet.** Popularity is structurally
+  **0** (held-out restaurants have no training reviews). DropoutNet, a method built for cold
+  start, is the *strongest* here (12.5 vs. 10.0 Hit@5); our two-tower is competitive but does
+  **not** beat it. Content is the decisive signal for cold items.
+- **Cold users — context wins, decisively.** The two-tower reaches 29.0 NDCG@10 vs.
+  Popularity's 22.8 and DropoutNet's 10.6. DropoutNet, lacking situational features, falls
+  below even Popularity — the gap the context sub-towers close, and this model's distinctive
+  contribution.
+- **Warm — Popularity is hard to beat.** The two-tower ties it (24.3 vs. 23.2); DropoutNet
+  (lightweight SVD backbone) trails. The personalized win is concentrated in cold start.
+
+One-line thesis: **content for cold items, context for cold users.**
 
 ---
 
@@ -113,7 +119,19 @@ models and epochs for fair comparison; training negatives are resampled every ep
 - **Cold-user leave-one-out onboarding** — a cold user's onboarding vector is built from
   their *test* reviews *excluding* the one containing the ground-truth positive, so the
   label never leaks into the input (`build_loo_onboarding()`).
-- **Baselines** — Random (uniform) and Popularity (rank by training review count).
+### Baselines
+
+- **Random** (uniform) and **Popularity** (rank by training review count).
+- **DropoutNet** (Volkovs et al., NeurIPS 2017) — a learned cold-start baseline, run on the
+  *same* frozen test cases (`scripts/dropoutnet_baseline.py` →
+  `results/dropoutnet_results.json`). It uses `k=64` collaborative latent factors from a
+  truncated SVD of the binary train interaction matrix (a lightweight WMF substitute) plus
+  the same content features the two-tower uses (user preference/onboarding; item categories +
+  price), and is trained to reconstruct collaborative affinity with per-sample latent
+  input-dropout — so content carries the signal when a latent is missing. At inference the
+  user latent is zeroed for cold users and the item latent for all candidates in the
+  cold-restaurant split (content-only ranking), mirroring the two-tower's protocol. Recomputed
+  Popularity matches the reference numbers to four decimals, confirming identical test cases.
 
 ---
 
