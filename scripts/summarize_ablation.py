@@ -12,39 +12,21 @@ Usage:
 
 import argparse
 import json
+import sys
 from pathlib import Path
 
 import pandas as pd
 
+# Ensure the project root is importable so `src` resolves when run as a script.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-# ── Experiment metadata ──────────────────────────────────────────────────────
-# Maps experiment name → human-readable description for the paper table.
+from src.experiments import (  # noqa: E402
+    DISPLAY_ORDER,
+    EXPERIMENT_LABELS,
+    KEY_COMPARISONS,
+    SPLITS,
+)
 
-EXPERIMENT_LABELS = {
-    "full_model":              "Full model (all features)",
-    "no_restaurant_context":   "No restaurant context (drop temporal)",
-    "no_restaurant_content":   "No restaurant content (temporal only)",
-    "no_user_context":         "No user context (drop dow/distance)",
-    "no_user_content":         "No user content (drop preferences)",
-    "content_x_content":       "Content × Content (no context either side)",
-    "context_x_context":       "Context × Context (no content either side)",
-}
-
-# Display order matches the 3×3 matrix: row by row
-DISPLAY_ORDER = [
-    # Row 1: User = All
-    "full_model",
-    "no_restaurant_context",
-    "no_restaurant_content",
-    # Row 2: User = Content Only
-    "no_user_context",
-    "content_x_content",
-    # Row 3: User = Context Only
-    "no_user_content",
-    "context_x_context",
-]
-
-SPLITS = ["warm", "cold_restaurant", "cold_user"]
 SPLIT_LABELS = {
     "warm": "Warm",
     "cold_restaurant": "Cold Rest.",
@@ -172,30 +154,10 @@ def print_key_comparisons(df: pd.DataFrame) -> None:
     print("  KEY COMPARISONS")
     print("=" * 80)
 
-    comparisons = [
-        ("Full vs No Restaurant Context",
-         "full_model", "no_restaurant_context",
-         "Does temporal context on the restaurant side help?"),
-        ("Full vs No Restaurant Content",
-         "full_model", "no_restaurant_content",
-         "How much do categories/price/attributes contribute?"),
-        ("Full vs No User Context",
-         "full_model", "no_user_context",
-         "Does day-of-week/distance context help?"),
-        ("Full vs No User Content",
-         "full_model", "no_user_content",
-         "Do user preference features help?"),
-        ("Full vs Content × Content",
-         "full_model", "content_x_content",
-         "Does ANY context help vs pure content matching?"),
-        ("Full vs Context × Context",
-         "full_model", "context_x_context",
-         "How far does context alone get you without content?"),
-    ]
-
     exp_lookup = dict(zip(df["experiment"], range(len(df))))
 
-    for title, exp_a, exp_b, question in comparisons:
+    for cmp in KEY_COMPARISONS:
+        title, exp_a, exp_b, question = cmp.title, cmp.baseline, cmp.variant, cmp.question
         if exp_a not in exp_lookup or exp_b not in exp_lookup:
             continue
         row_a = df.iloc[exp_lookup[exp_a]]
