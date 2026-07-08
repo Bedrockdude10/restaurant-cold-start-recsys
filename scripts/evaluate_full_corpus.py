@@ -211,18 +211,33 @@ def main():
             a = acc.setdefault(name, [0.0, 0.0, 0])
             a[0] += s_hit; a[1] += s_ndcg; a[2] += n
 
+        # cold_user: build all cases + LOO onboarding ONCE (rebuilding LOO per
+        # chunk repeats a full merge/pivot over all cold reviews). Other splits
+        # build cases lazily per chunk to bound memory on large warm pools.
+        prebuilt = loo_all = None
+        if split == "cold_user" and model is not None:
+            prebuilt = build_full_corpus_cases(pos, pool_ids, geo_map, user_pos, args.corpus)
+            loo_all = build_loo_onboarding(prebuilt, tr, restaurants, feats, max_k=5, seed=seed)
+
+        def chunks():
+            if prebuilt is not None:
+                for i in range(0, len(prebuilt), args.chunk):
+                    lo = loo_all[i:i + args.chunk] if loo_all is not None else None
+                    yield prebuilt[i:i + args.chunk], lo
+            else:
+                for start in range(0, len(pos), args.chunk):
+                    yield build_full_corpus_cases(
+                        pos.iloc[start:start + args.chunk], pool_ids, geo_map,
+                        user_pos, args.corpus), None
+
         t0 = time.time()
-        for start in range(0, len(pos), args.chunk):
-            chunk = pos.iloc[start:start + args.chunk]
-            cases = build_full_corpus_cases(chunk, pool_ids, geo_map, user_pos, args.corpus)
+        for cases, loo in chunks():
             if not cases:
                 continue
             bm = baseline_metrics(cases, train_counts, seed, args.hit_k, args.ndcg_k)
             for name, (sh, sn, n) in bm.items():
                 add(name, sh, sn, n)
             if model:
-                loo = (build_loo_onboarding(cases, tr, restaurants, feats, max_k=5, seed=seed)
-                       if split == "cold_user" else None)
                 m = score_test_cases(
                     model=model, test_cases=cases,
                     biz_features=feats.biz_features,

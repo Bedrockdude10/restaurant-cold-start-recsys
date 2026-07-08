@@ -142,31 +142,41 @@ def prepare_biz_features(
 
     Includes temporal_vec for the restaurant context tower.
     """
+    # Column-vectorized: iterate plain Python lists pulled from columns rather
+    # than DataFrame.iterrows() (which builds a Series per row). Same output.
     temporal_lookup: dict[str, list[float]] = {}
     if checkin_profiles is not None:
         hour_cols = [f"hour_dist_{h}" for h in range(24)]
         dow_cols = [f"dow_dist_{d}" for d in range(7)]
-        for _, row in checkin_profiles.iterrows():
-            bid = row["business_id"]
-            temporal_lookup[bid] = (
-                [float(row[c]) for c in hour_cols]
-                + [float(row[c]) for c in dow_cols]
-            )
+        cp_bids = checkin_profiles["business_id"].to_numpy()
+        cp_vals = checkin_profiles[hour_cols + dow_cols].to_numpy(dtype=float)
+        temporal_lookup = {b: v for b, v in zip(cp_bids, cp_vals.tolist())}
 
     zero_temporal = [0.0] * TEMPORAL_DIM
+    n = len(restaurants)
+    cols = restaurants.columns
+
+    def _col(name, default):
+        return restaurants[name].tolist() if name in cols else [default] * n
+
+    bids = restaurants["business_id"].tolist()
+    cats_col = _col("categories", None)
+    price_col = _col("price_tier", 0)
+    lat_col = _col("latitude", 0.0)
+    lon_col = _col("longitude", 0.0)
+    attr_col = _col("attributes", None)
 
     biz_features = {}
-    for _, row in restaurants.iterrows():
-        bid = row["business_id"]
-        attr_feats = extract_attribute_features(row.get("attributes"))
-        attr_vec = [attr_feats[name] for name in ATTR_NAMES]
-        biz_features[bid] = {
-            "categories": row["categories"] if isinstance(row["categories"], (list, np.ndarray)) else [],
-            "price_tier": int(row.get("price_tier", 0)),
-            "attr_vec": attr_vec,
-            "latitude": float(row.get("latitude", 0.0)),
-            "longitude": float(row.get("longitude", 0.0)),
-            "temporal_vec": temporal_lookup.get(bid, zero_temporal),
+    for i in range(n):
+        attr_feats = extract_attribute_features(attr_col[i])
+        cats = cats_col[i]
+        biz_features[bids[i]] = {
+            "categories": cats if isinstance(cats, (list, np.ndarray)) else [],
+            "price_tier": int(price_col[i]),
+            "attr_vec": [attr_feats[name] for name in ATTR_NAMES],
+            "latitude": float(lat_col[i]),
+            "longitude": float(lon_col[i]),
+            "temporal_vec": temporal_lookup.get(bids[i], zero_temporal),
         }
     return biz_features
 
