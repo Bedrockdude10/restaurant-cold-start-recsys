@@ -24,6 +24,7 @@ from src.experiments import (  # noqa: E402
     DISPLAY_ORDER,
     EXPERIMENT_LABELS,
     KEY_COMPARISONS,
+    SHORT_LABELS,
     SPLITS,
 )
 
@@ -55,49 +56,77 @@ def load_experiment_results(results_dir: Path) -> dict[str, dict]:
     return experiments
 
 
-def build_results_table(experiments: dict[str, dict]) -> pd.DataFrame:
-    """Build a flat DataFrame with one row per experiment.
+def load_dropoutnet(path: Path | None) -> dict | None:
+    """Load the DropoutNet baseline results, if the file exists.
 
-    Columns: experiment, label, {split}_{metric} for each split × metric.
+    DropoutNet is evaluated by scripts/dropoutnet_baseline.py on the SAME
+    frozen test cases as the ablation eval (verified by matching Popularity),
+    but stored separately in results/dropoutnet_results.json.
     """
-    rows = []
-    for exp_name in DISPLAY_ORDER:
-        if exp_name not in experiments:
-            continue
-        data = experiments[exp_name]
-        row = {
-            "experiment": exp_name,
-            "label": EXPERIMENT_LABELS.get(exp_name, exp_name),
-        }
-        for split in SPLITS:
-            split_data = data.get(split, {})
-            # Handle baseline + TwoTower results
-            tt = split_data.get("TwoTower", {})
-            row[f"{split}_hit5"] = tt.get("Hit@5", None)
-            row[f"{split}_ndcg10"] = tt.get("NDCG@10", None)
-            row[f"{split}_n_cases"] = tt.get("n_cases", None)
-            # Also grab baselines if present (for the first experiment)
+    if not path or not path.exists():
+        return None
+    with open(path) as f:
+        data = json.load(f)
+    return data.get("metrics", data)
+
+
+def _result_row(name: str, label: str, short: str, data: dict,
+                model_key: str = "TwoTower", include_baselines: bool = False) -> dict:
+    """Build one flat table row from a per-split results dict.
+
+    Args:
+        model_key: which model's scores to read per split (e.g. "TwoTower"
+            for ablations, "DropoutNet" for the DropoutNet baseline).
+        include_baselines: also emit Random/Popularity columns when present.
+    """
+    row = {"experiment": name, "label": label, "short_label": short}
+    for split in SPLITS:
+        split_data = data.get(split, {})
+        m = split_data.get(model_key, {})
+        row[f"{split}_hit5"] = m.get("Hit@5", None)
+        row[f"{split}_ndcg10"] = m.get("NDCG@10", None)
+        row[f"{split}_n_cases"] = m.get("n_cases", None)
+        if include_baselines:
             for baseline in ["Random", "Popularity"]:
                 bl = split_data.get(baseline, {})
                 if bl:
                     row[f"{split}_{baseline.lower()}_hit5"] = bl.get("Hit@5", None)
                     row[f"{split}_{baseline.lower()}_ndcg10"] = bl.get("NDCG@10", None)
-        rows.append(row)
+    return row
+
+
+def build_results_table(experiments: dict[str, dict],
+                        dropoutnet: dict | None = None) -> pd.DataFrame:
+    """Build a flat DataFrame with one row per experiment.
+
+    Columns: experiment, label, {split}_{metric} for each split × metric.
+    The DropoutNet baseline (if provided) is appended as a final row.
+    """
+    rows = []
+    for exp_name in DISPLAY_ORDER:
+        if exp_name not in experiments:
+            continue
+        rows.append(_result_row(
+            exp_name, EXPERIMENT_LABELS.get(exp_name, exp_name),
+            SHORT_LABELS.get(exp_name, exp_name), experiments[exp_name],
+            include_baselines=True,
+        ))
 
     # Add any experiments not in DISPLAY_ORDER
     for exp_name, data in experiments.items():
         if exp_name not in DISPLAY_ORDER:
-            row = {
-                "experiment": exp_name,
-                "label": EXPERIMENT_LABELS.get(exp_name, exp_name),
-            }
-            for split in SPLITS:
-                split_data = data.get(split, {})
-                tt = split_data.get("TwoTower", {})
-                row[f"{split}_hit5"] = tt.get("Hit@5", None)
-                row[f"{split}_ndcg10"] = tt.get("NDCG@10", None)
-                row[f"{split}_n_cases"] = tt.get("n_cases", None)
-            rows.append(row)
+            rows.append(_result_row(
+                exp_name, EXPERIMENT_LABELS.get(exp_name, exp_name),
+                SHORT_LABELS.get(exp_name, exp_name), data,
+                include_baselines=True,
+            ))
+
+    # Append the DropoutNet baseline as its own row (different model key).
+    if dropoutnet:
+        rows.append(_result_row(
+            "dropoutnet", "DropoutNet (cold-start baseline)", "DropoutNet",
+            dropoutnet, model_key="DropoutNet",
+        ))
 
     return pd.DataFrame(rows)
 
@@ -148,6 +177,40 @@ def print_main_table(df: pd.DataFrame) -> None:
         print()
 
 
+def _print_comparison(df: pd.DataFrame, exp_lookup: dict,
+                      title: str, exp_a: str, exp_b: str, question: str) -> None:
+    """Print a single A-vs-B Hit@5 comparison block, if both rows exist."""
+    if exp_a not in exp_lookup or exp_b not in exp_lookup:
+        return
+    row_a = df.iloc[exp_lookup[exp_a]]
+    row_b = df.iloc[exp_lookup[exp_b]]
+
+    print(f"\n  {title}")
+    print(f"  Question: {question}")
+    print(f"  {'':20s}  {'Warm H@5':>10s}  {'Cold-R H@5':>10s}  {'Cold-U H@5':>10s}")
+
+    for row, label in [(row_a, row_a["label"]), (row_b, row_b["label"])]:
+        short_label = label[:20] if len(label) > 20 else label
+        vals = []
+        for split in SPLITS:
+            h = row.get(f"{split}_hit5")
+            vals.append(f"{h:.4f}" if h is not None else "  —   ")
+        print(f"  {short_label:<20s}  {vals[0]:>10s}  {vals[1]:>10s}  {vals[2]:>10s}")
+
+    # Delta
+    deltas = []
+    for split in SPLITS:
+        ha = row_a.get(f"{split}_hit5")
+        hb = row_b.get(f"{split}_hit5")
+        if ha is not None and hb is not None:
+            delta = ha - hb
+            sign = "+" if delta >= 0 else ""
+            deltas.append(f"{sign}{delta:.4f}")
+        else:
+            deltas.append("  —   ")
+    print(f"  {'Δ (A - B)':<20s}  {deltas[0]:>10s}  {deltas[1]:>10s}  {deltas[2]:>10s}")
+
+
 def print_key_comparisons(df: pd.DataFrame) -> None:
     """Print the key ablation comparisons that tell the paper's story."""
     print("\n" + "=" * 80)
@@ -157,39 +220,18 @@ def print_key_comparisons(df: pd.DataFrame) -> None:
     exp_lookup = dict(zip(df["experiment"], range(len(df))))
 
     for cmp in KEY_COMPARISONS:
-        title, exp_a, exp_b, question = cmp.title, cmp.baseline, cmp.variant, cmp.question
-        if exp_a not in exp_lookup or exp_b not in exp_lookup:
-            continue
-        row_a = df.iloc[exp_lookup[exp_a]]
-        row_b = df.iloc[exp_lookup[exp_b]]
+        _print_comparison(df, exp_lookup, cmp.title, cmp.baseline, cmp.variant, cmp.question)
 
-        print(f"\n  {title}")
-        print(f"  Question: {question}")
-        print(f"  {'':20s}  {'Warm H@5':>10s}  {'Cold-R H@5':>10s}  {'Cold-U H@5':>10s}")
-
-        for row, label in [(row_a, row_a["label"]), (row_b, row_b["label"])]:
-            short_label = label[:20] if len(label) > 20 else label
-            vals = []
-            for split in SPLITS:
-                h = row.get(f"{split}_hit5")
-                vals.append(f"{h:.4f}" if h is not None else "  —   ")
-            print(f"  {short_label:<20s}  {vals[0]:>10s}  {vals[1]:>10s}  {vals[2]:>10s}")
-
-        # Delta
-        deltas = []
-        for split in SPLITS:
-            ha = row_a.get(f"{split}_hit5")
-            hb = row_b.get(f"{split}_hit5")
-            if ha is not None and hb is not None:
-                delta = ha - hb
-                sign = "+" if delta >= 0 else ""
-                deltas.append(f"{sign}{delta:.4f}")
-            else:
-                deltas.append("  —   ")
-        print(f"  {'Δ (A - B)':<20s}  {deltas[0]:>10s}  {deltas[1]:>10s}  {deltas[2]:>10s}")
+    # DropoutNet is a separate model, not in the registry — compare it against
+    # the full two-tower when its results are present.
+    _print_comparison(
+        df, exp_lookup, "Full model vs DropoutNet", "full_model", "dropoutnet",
+        "How does the two-tower compare to the DropoutNet cold-start baseline?",
+    )
 
 
-def summarize(results_dir: Path, csv_path: Path | None = None) -> None:
+def summarize(results_dir: Path, csv_path: Path | None = None,
+              dropoutnet_path: Path | None = None) -> None:
     """Load results and print summary tables.
 
     Can be called from run_ablation.py or standalone via CLI.
@@ -205,7 +247,14 @@ def summarize(results_dir: Path, csv_path: Path | None = None) -> None:
 
     print(f"Found {len(experiments)} completed experiments")
 
-    df = build_results_table(experiments)
+    # DropoutNet baseline lives alongside the ablation dir (results/) by default.
+    if dropoutnet_path is None:
+        dropoutnet_path = results_dir.parent / "dropoutnet_results.json"
+    dropoutnet = load_dropoutnet(dropoutnet_path)
+    if dropoutnet:
+        print(f"Including DropoutNet baseline from {dropoutnet_path}")
+
+    df = build_results_table(experiments, dropoutnet=dropoutnet)
     print_main_table(df)
     print_key_comparisons(df)
 
@@ -222,16 +271,27 @@ def summarize(results_dir: Path, csv_path: Path | None = None) -> None:
 
 
 def main():
+    # Console tables use non-ASCII glyphs (×, Δ); make stdout robust on
+    # Windows cp1252 terminals so a print can never abort the CSV write.
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
     parser = argparse.ArgumentParser(description="Summarize ablation study results")
     parser.add_argument("--results-dir", default="results/ablation",
                         help="Directory containing experiment subdirectories")
     parser.add_argument("--csv", default=None,
                         help="Optional: save results table to CSV")
+    parser.add_argument("--dropoutnet", default=None,
+                        help="Optional: path to dropoutnet_results.json "
+                             "(default: <results-dir>/../dropoutnet_results.json)")
     args = parser.parse_args()
 
     summarize(
         results_dir=Path(args.results_dir),
         csv_path=Path(args.csv) if args.csv else None,
+        dropoutnet_path=Path(args.dropoutnet) if args.dropoutnet else None,
     )
 
 if __name__ == "__main__":
