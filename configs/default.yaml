@@ -1,0 +1,53 @@
+# Default configuration for two-tower cold start model
+# Override with: python scripts/train.py --config configs/default.yaml
+
+data:
+  date_cutoff: "2020-01-01"  # Only use reviews before this date for training
+  raw_dir: data/raw
+  extracted_dir: data/raw/extracted
+  processed_dir: data/processed
+  splits_dir: data/splits
+  # Yelp filtering thresholds
+  min_user_reviews: 10        # Users with fewer reviews excluded from train
+  min_business_reviews: 20    # Businesses with fewer reviews excluded from restaurant cold start eval
+  restaurant_categories_only: true  # Filter to restaurant/food businesses only
+
+features:
+  # User/context tower
+  cuisine_embedding_dim: 32
+  time_bucket_embedding_dim: 8   # 5 buckets: morning/lunch/afternoon/dinner/late-night
+  day_of_week_embedding_dim: 8
+  region_embedding_dim: 16
+  # Restaurant/item tower
+  category_embedding_dim: 32
+  price_embedding_dim: 4         # 4 price tiers
+  attribute_dim: 16              # Binary restaurant attributes
+  geo_embedding_dim: 16
+
+model:
+  user_tower_hidden: [128, 64]
+  item_tower_hidden: [128, 64]
+  embedding_dim: 64              # Final embedding dimension for both towers
+  dropout: 0.2
+  similarity: dot_product        # dot_product or cosine
+
+training:
+  batch_size: 4096
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  epochs: 50
+  early_stopping_patience: 5
+  num_negatives: 4               # Negative samples per positive
+  loss: bpr                      # bce or contrastive or bpr
+  seed: 42
+
+evaluation:
+  hit_k: 5
+  ndcg_k: 10
+  num_cold_start_users: 1000     # Number of users to simulate as cold start
+  num_cold_start_businesses: 500  # Number of businesses to mask
+
+wandb:
+  project: restaurant-cold-start-recsys
+  entity: null                    # Set to your W&B team name
+  tags: ["cold-start", "two-tower"]

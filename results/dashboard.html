@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Restaurant Cold-Start RecSys — Ablation Dashboard</title>
+<style>
+  :root {
+    --bg: #FAFAFA; --bg2: #F1F0EC; --txt: #2C2C2A; --txt2: #888780; --txt3: #B4B2A9;
+    --bdr: rgba(0,0,0,0.08); --grid: rgba(0,0,0,0.06);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #1a1a1a; --bg2: #252524; --txt: #E5E4E0; --txt2: #B4B2A9; --txt3: #73726c;
+      --bdr: rgba(255,255,255,0.1); --grid: rgba(255,255,255,0.07);
+    }
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: var(--bg); color: var(--txt); line-height: 1.5; }
+  .wrap { max-width: 960px; margin: 0 auto; padding: 2rem 1.5rem; }
+  h1 { font-size: 22px; font-weight: 600; margin-bottom: 0.25rem; }
+  h1 span { font-weight: 400; color: var(--txt2); }
+  .subtitle { font-size: 14px; color: var(--txt2); margin-bottom: 2rem; }
+  .metrics { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-bottom: 2rem; }
+  .metric { background: var(--bg2); border-radius: 8px; padding: 1rem; }
+  .metric .label { font-size: 13px; color: var(--txt2); margin-bottom: 4px; }
+  .metric .value { font-size: 24px; font-weight: 500; }
+  .metric .sub { font-size: 12px; color: var(--txt3); margin-top: 4px; }
+  .section-label { font-size: 14px; color: var(--txt2); margin: 0 0 0.5rem; }
+  .btn-row { display: flex; gap: 8px; margin-bottom: 1rem; flex-wrap: wrap; }
+  .btn-row button { background: transparent; border: 1px solid var(--bdr); color: var(--txt); padding: 6px 14px; border-radius: 6px; cursor: pointer; font-size: 13px; transition: all 0.15s; }
+  .btn-row button:hover { background: var(--bg2); }
+  .btn-row button.active { font-weight: 600; border-color: var(--txt2); }
+  .chart-wrap { position: relative; width: 100%; margin-bottom: 2.5rem; }
+  table { width: 100%; border-collapse: separate; border-spacing: 4px; font-size: 13px; }
+  td.hm { text-align: center; padding: 12px 8px; border-radius: 4px; font-weight: 500; font-variant-numeric: tabular-nums; font-size: 14px; }
+  td.hm-empty { text-align: center; padding: 12px 8px; color: var(--txt3); background: var(--bg2); border-radius: 4px; }
+  td.row-label { padding: 8px 12px 8px 0; font-weight: 500; color: var(--txt2); font-size: 12px; white-space: nowrap; }
+  td.col-label { text-align: center; padding: 8px 4px; font-weight: 500; color: var(--txt2); font-size: 12px; }
+  @media (max-width: 640px) { .metrics { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>Restaurant Cold-Start RecSys <span>ablation dashboard</span></h1>
+<p class="subtitle">CS 7180 &mdash; Two-tower cold start recommendation model &mdash; 12 experiments across 3 evaluation splits</p>
+
+<div class="metrics" id="metrics-grid"></div>
+
+<p class="section-label">All experiments &mdash; performance across evaluation splits</p>
+<div class="btn-row">
+  <button id="btn-hit5" class="active" onclick="setMetric('Hit@5')">Hit@5</button>
+  <button id="btn-ndcg10" onclick="setMetric('NDCG@10')">NDCG@10</button>
+</div>
+<div class="chart-wrap" style="height: 400px;"><canvas id="barChart"></canvas></div>
+
+<p class="section-label">Ablation heatmap &mdash; NDCG@10 by feature combination</p>
+<div class="btn-row">
+  <button id="btn-warm" onclick="setSplit('warm')">Warm</button>
+  <button id="btn-cold_restaurant" class="active" onclick="setSplit('cold_restaurant')">Cold restaurant</button>
+  <button id="btn-cold_user" onclick="setSplit('cold_user')">Cold user</button>
+</div>
+<div id="heatmap" style="margin-bottom: 2.5rem;"></div>
+
+<p class="section-label">Feature contribution &mdash; NDCG@10 delta when each feature group is removed</p>
+<div class="chart-wrap" style="height: 340px;"><canvas id="deltaChart"></canvas></div>
+
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+<script>
+const R = {
+  full_model: {
+    warm: { TwoTower: { 'Hit@5': 0.2652, 'NDCG@10': 0.2264 }, Popularity: { 'Hit@5': 0.2717, 'NDCG@10': 0.2317 }, Random: { 'Hit@5': 0.0542, 'NDCG@10': 0.0499 }},
+    cold_restaurant: { TwoTower: { 'Hit@5': 0.0898, 'NDCG@10': 0.0933 }, Popularity: { 'Hit@5': 0.0, 'NDCG@10': 0.0 }, Random: { 'Hit@5': 0.0409, 'NDCG@10': 0.0384 }},
+    cold_user: { TwoTower: { 'Hit@5': 0.2910, 'NDCG@10': 0.2476 }, Popularity: { 'Hit@5': 0.2708, 'NDCG@10': 0.2282 }, Random: { 'Hit@5': 0.0618, 'NDCG@10': 0.0544 }}
+  },
+  gated_fusion_with_checkin: { warm: { TwoTower: { 'Hit@5': 0.2866, 'NDCG@10': 0.2429 }}, cold_restaurant: { TwoTower: { 'Hit@5': 0.0884, 'NDCG@10': 0.0747 }}, cold_user: { TwoTower: { 'Hit@5': 0.3152, 'NDCG@10': 0.2661 }}},
+  with_user_checkin: { warm: { TwoTower: { 'Hit@5': 0.2855, 'NDCG@10': 0.2431 }}, cold_restaurant: { TwoTower: { 'Hit@5': 0.0913, 'NDCG@10': 0.0800 }}, cold_user: { TwoTower: { 'Hit@5': 0.3135, 'NDCG@10': 0.2667 }}},
+  checkin_replaces_dow: { warm: { TwoTower: { 'Hit@5': 0.2799, 'NDCG@10': 0.2381 }}, cold_restaurant: { TwoTower: { 'Hit@5': 0.1001, 'NDCG@10': 0.0855 }}, cold_user: { TwoTower: { 'Hit@5': 0.3176, 'NDCG@10': 0.2698 }}},
+  no_user_context: { warm: { TwoTower: { 'Hit@5': 0.2648, 'NDCG@10': 0.2258 }}, cold_restaurant: { TwoTower: { 'Hit@5': 0.0701, 'NDCG@10': 0.0677 }}, cold_user: { TwoTower: { 'Hit@5': 0.2488, 'NDCG@10': 0.2174 }}},
+  no_user_content: { warm: { TwoTower: { 'Hit@5': 0.2724, 'NDCG@10': 0.2310 }}, cold_restaurant: { TwoTower: { 'Hit@5': 0.0394, 'NDCG@10': 0.0361 }}, cold_user: { TwoTower: { 'Hit@5': 0.3152, 'NDCG@10': 0.2904 }}},
+  content_x_content: { warm: { TwoTower: { 'Hit@5': 0.2501, 'NDCG@10': 0.2142 }}, cold_restaurant: { TwoTower: { 'Hit@5': 0.0504, 'NDCG@10': 0.0470 }}, cold_user: { TwoTower: { 'Hit@5': 0.2419, 'NDCG@10': 0.2073 }}},
+  context_x_context: { warm: { TwoTower: { 'Hit@5': 0.2752, 'NDCG@10': 0.2347 }}, cold_restaurant: { TwoTower: { 'Hit@5': 0.0248, 'NDCG@10': 0.0248 }}, cold_user: { TwoTower: { 'Hit@5': 0.3181, 'NDCG@10': 0.2902 }}},
+  no_onboarding: { warm: { TwoTower: { 'Hit@5': 0.2765, 'NDCG@10': 0.2340 }}, cold_restaurant: { TwoTower: { 'Hit@5': 0.0701, 'NDCG@10': 0.0707 }}, cold_user: { TwoTower: { 'Hit@5': 0.2921, 'NDCG@10': 0.2565 }}},
+  no_preferences: { warm: { TwoTower: { 'Hit@5': 0.2789, 'NDCG@10': 0.2363 }}, cold_restaurant: { TwoTower: { 'Hit@5': 0.0394, 'NDCG@10': 0.0366 }}, cold_user: { TwoTower: { 'Hit@5': 0.3181, 'NDCG@10': 0.2891 }}},
+  no_temporal: { warm: { TwoTower: { 'Hit@5': 0.2613, 'NDCG@10': 0.2239 }}, cold_restaurant: { TwoTower: { 'Hit@5': 0.0672, 'NDCG@10': 0.0608 }}, cold_user: { TwoTower: { 'Hit@5': 0.2823, 'NDCG@10': 0.2435 }}},
+  gated_fusion: { warm: { TwoTower: { 'Hit@5': 0.2772, 'NDCG@10': 0.2352 }}, cold_restaurant: { TwoTower: { 'Hit@5': 0.0767, 'NDCG@10': 0.0724 }}, cold_user: { TwoTower: { 'Hit@5': 0.2910, 'NDCG@10': 0.2544 }}}
+};
+
+const isDark = matchMedia('(prefers-color-scheme: dark)').matches;
+const txtPri = isDark ? '#E5E4E0' : '#2C2C2A';
+const txtSec = isDark ? '#B4B2A9' : '#888780';
+const gridC = isDark ? 'rgba(255,255,255,0.07)' : 'rgba(0,0,0,0.06)';
+
+// Metric cards
+const mg = document.getElementById('metrics-grid');
+function mc(label, val, sub, accent) {
+  return `<div class="metric"><div class="label">${label}</div><div class="value" style="color:${accent}">${val}</div><div class="sub">${sub}</div></div>`;
+}
+mg.innerHTML =
+  mc('Best warm NDCG@10', (R.with_user_checkin.warm.TwoTower['NDCG@10']*100).toFixed(1)+'%', 'with_user_checkin variant', '#378ADD') +
+  mc('Cold restaurant Hit@5', (R.checkin_replaces_dow.cold_restaurant.TwoTower['Hit@5']*100).toFixed(1)+'%', 'checkin_replaces_dow \u2014 2.4\u00d7 random', '#D85A30') +
+  mc('Cold user NDCG@10', (R.context_x_context.cold_user.TwoTower['NDCG@10']*100).toFixed(1)+'%', 'context_x_context \u2014 +27% vs popularity', '#1D9E75');
+
+// Bar chart
+let curMetric = 'Hit@5', barChart = null;
+function setMetric(m) {
+  curMetric = m;
+  document.querySelectorAll('.btn-row button').forEach(b => {if(b.id.startsWith('btn-hit')||b.id.startsWith('btn-ndcg')) b.classList.remove('active')});
+  document.getElementById(m === 'Hit@5' ? 'btn-hit5' : 'btn-ndcg10').classList.add('active');
+  drawBar();
+}
+function drawBar() {
+  const m = curMetric;
+  const exps = [['Full model','full_model'],['+ User checkin','with_user_checkin'],['+ Gated + checkin','gated_fusion_with_checkin'],['Checkin replaces DoW','checkin_replaces_dow'],['Gated fusion','gated_fusion'],['No user context','no_user_context'],['No user content','no_user_content'],['Content \u00d7 content','content_x_content'],['Context \u00d7 context','context_x_context'],['No temporal','no_temporal'],['No onboarding','no_onboarding'],['No preferences','no_preferences']];
+  if (barChart) barChart.destroy();
+  barChart = new Chart(document.getElementById('barChart'), {
+    type: 'bar',
+    data: { labels: exps.map(e=>e[0]), datasets: [
+      { label: 'Warm', data: exps.map(e=>R[e[1]].warm.TwoTower[m]), backgroundColor: '#85B7EB', borderColor: '#378ADD', borderWidth: 1 },
+      { label: 'Cold restaurant', data: exps.map(e=>R[e[1]].cold_restaurant.TwoTower[m]), backgroundColor: '#F0997B', borderColor: '#D85A30', borderWidth: 1 },
+      { label: 'Cold user', data: exps.map(e=>R[e[1]].cold_user.TwoTower[m]), backgroundColor: '#5DCAA5', borderColor: '#1D9E75', borderWidth: 1 }
+    ]},
+    options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'top', labels: { color: txtPri, font: {size:12}, boxWidth: 12, padding: 16 }}, tooltip: { callbacks: { label: c=>c.dataset.label+': '+(c.raw*100).toFixed(1)+'%' }}},
+      scales: { x: { ticks: { color: txtSec, font: {size:10}, maxRotation: 45, autoSkip: false }, grid: {display:false} }, y: { ticks: { color: txtSec, callback: v=>(v*100).toFixed(0)+'%' }, grid: {color: gridC}, beginAtZero: true }}}
+  });
+}
+
+// Heatmap
+let curSplit = 'cold_restaurant';
+function setSplit(s) {
+  curSplit = s;
+  ['warm','cold_restaurant','cold_user'].forEach(k => { const b=document.getElementById('btn-'+k); b.classList.toggle('active', k===s); });
+  drawHeatmap();
+}
+function drawHeatmap() {
+  const s = curSplit;
+  const rows = [
+    { label: 'User: all features', cells: ['full_model','no_temporal','no_user_content'] },
+    { label: 'User: content only', cells: ['no_user_context','content_x_content',null] },
+    { label: 'User: context only', cells: ['no_user_content',null,'context_x_context'] }
+  ];
+  const colLabels = ['Rest: all','Rest: content only','Rest: context only'];
+  let vals = [];
+  rows.forEach(r => r.cells.forEach(c => { if(c) vals.push(R[c][s].TwoTower['NDCG@10']); }));
+  const mn = Math.min(...vals), mx = Math.max(...vals);
+  function lerp(a,b,t){return Math.round(a+(b-a)*t)}
+  function bg(v){ let t=mx>mn?(v-mn)/(mx-mn):0.5; if(isDark)return `rgb(${lerp(60,30,t)},${lerp(35,90,t)},${lerp(55,60,t)})`; return `rgb(${lerp(230,100,t)},${lerp(100,190,t)},${lerp(100,120,t)})`; }
+  function fg(v){ let t=mx>mn?(v-mn)/(mx-mn):0.5; return (isDark||t>0.45)?'#fff':'#1a1a1a'; }
+  let h = '<table><tr><td></td>'+colLabels.map(l=>`<td class="col-label">${l}</td>`).join('')+'</tr>';
+  rows.forEach(r => { h += `<tr><td class="row-label">${r.label}</td>`; r.cells.forEach(c => { if(!c){h+='<td class="hm-empty">\u2014</td>';} else { const v=R[c][s].TwoTower['NDCG@10']; h+=`<td class="hm" style="background:${bg(v)};color:${fg(v)}">${(v*100).toFixed(2)}%</td>`; }}); h+='</tr>'; });
+  h += '</table>';
+  document.getElementById('heatmap').innerHTML = h;
+}
+
+// Delta chart
+let deltaChart = null;
+function drawDelta() {
+  const base = R.full_model;
+  const ablations = [['User context (DoW + dist)','no_user_context'],['User content (prefs + onb)','no_user_content'],['Restaurant temporal','no_temporal'],['Onboarding signal','no_onboarding'],['Preference signal','no_preferences']];
+  const splits = ['warm','cold_restaurant','cold_user'];
+  const colors = {warm:'#378ADD',cold_restaurant:'#D85A30',cold_user:'#1D9E75'};
+  const datasets = splits.map(s => ({ label: s==='warm'?'Warm':s==='cold_restaurant'?'Cold restaurant':'Cold user', data: ablations.map(([,k])=>parseFloat(((R[k][s].TwoTower['NDCG@10']-base[s].TwoTower['NDCG@10'])*100).toFixed(2))), backgroundColor: colors[s]+'99', borderColor: colors[s], borderWidth: 1 }));
+  if(deltaChart) deltaChart.destroy();
+  deltaChart = new Chart(document.getElementById('deltaChart'), {
+    type: 'bar', data: { labels: ablations.map(a=>a[0]), datasets },
+    options: { indexAxis: 'y', responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'top', labels: { color: txtPri, font: {size:12}, boxWidth: 12, padding: 16 }}, tooltip: { callbacks: { label: c=>c.dataset.label+': '+(c.raw>0?'+':'')+c.raw.toFixed(2)+' pp' }}},
+      scales: { x: { ticks: { color: txtSec, callback: v=>(v>0?'+':'')+v.toFixed(1)+' pp' }, grid: {color:gridC}, title: {display:true, text:'NDCG@10 change (percentage points)', color:txtSec, font:{size:11}}}, y: { ticks: {color:txtSec, font:{size:11}}, grid:{display:false} }}}
+  });
+}
+
+drawBar(); drawHeatmap(); drawDelta();
+</script>
+</body>
+</html>
