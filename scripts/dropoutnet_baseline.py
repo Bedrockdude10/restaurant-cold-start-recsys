@@ -54,6 +54,9 @@ from src.data.pipeline import (  # noqa: E402
     build_loo_onboarding,
 )
 from src.utils.config import load_config  # noqa: E402
+from src.evaluation.significance import (  # noqa: E402
+    wilson_ci, bootstrap_ci, paired_bootstrap_diff, mcnemar,
+)
 
 SPLIT_FILES = {
     "warm": "test_warm.parquet",
@@ -83,6 +86,19 @@ def metrics_from_scores(scores: np.ndarray, pos_col: np.ndarray) -> dict:
     hit5 = (rank < 5).mean()
     ndcg = np.where(rank < 10, 1.0 / np.log2(rank + 2), 0.0).mean()
     return {"Hit@5": float(hit5), "NDCG@10": float(ndcg), "n_cases": int(n)}
+
+
+def percase_metrics(scores: np.ndarray, pos_col: np.ndarray):
+    """Per-case (hit5, ndcg) arrays using the same ranking as metrics_from_scores."""
+    n, ncand = scores.shape
+    pos_scores = scores[np.arange(n), pos_col]
+    greater = (scores > pos_scores[:, None]).sum(1)
+    tied_before = ((scores == pos_scores[:, None])
+                   & (np.arange(ncand)[None, :] < pos_col[:, None])).sum(1)
+    rank = greater + tied_before
+    hit5 = (rank < 5).astype(np.float64)
+    ndcg = np.where(rank < 10, 1.0 / np.log2(rank + 2), 0.0)
+    return hit5, ndcg
 
 
 # ── Candidate/positive tensors from TestCase list ─────────────────────────────
@@ -142,6 +158,10 @@ def main():
     ap.add_argument("--rating-threshold", type=float, default=3.0)
     ap.add_argument("--output", default=str(ROOT / "results/dropoutnet_results.json"))
     ap.add_argument("--smoke", action="store_true", help="tiny/fast validation run")
+    ap.add_argument("--significance", action="store_true",
+                    help="report Wilson CIs (Hit@5), bootstrap CIs (NDCG@10), and paired tests")
+    ap.add_argument("--dump-percase", default=None,
+                    help="directory to save per-case hit5/ndcg arrays (.npz) for cross-model tests")
     args = ap.parse_args()
 
     if args.smoke:
@@ -355,6 +375,52 @@ def main():
         print(f"\n[{split}]  ({len(test_cases):,} cases)")
         for name, m in res.items():
             print(f"    {name:12s}  Hit@5={m['Hit@5']:.4f}  NDCG@10={m['NDCG@10']:.4f}")
+
+        if args.significance or args.dump_percase:
+            pc = {
+                "Random": percase_metrics(rand_scores, pos_col),
+                "Popularity": percase_metrics(pop_scores, pos_col),
+                "DropoutNet": percase_metrics(dn_scores, pos_col),
+            }
+            if args.dump_percase:
+                dd = Path(args.dump_percase)
+                dd.mkdir(parents=True, exist_ok=True)
+                np.savez(
+                    dd / f"percase_{split}.npz",
+                    **{f"{k}_hit5": v[0] for k, v in pc.items()},
+                    **{f"{k}_ndcg": v[1] for k, v in pc.items()},
+                )
+            if args.significance:
+                sig = {}
+                for name, (h, nd) in pc.items():
+                    _, wlo, whi = wilson_ci(int(h.sum()), len(h))
+                    _, blo, bhi = bootstrap_ci(nd, seed=seed)
+                    sig[name] = {
+                        "hit5_wilson95": [round(wlo, 4), round(whi, 4)],
+                        "ndcg_bootstrap95": [round(blo, 4), round(bhi, 4)],
+                    }
+                for ref in ("Popularity", "Random"):
+                    d, lo, hi, p = paired_bootstrap_diff(
+                        pc["DropoutNet"][1], pc[ref][1], seed=seed)
+                    _, _, pm = mcnemar(
+                        pc["DropoutNet"][0].astype(bool), pc[ref][0].astype(bool))
+                    sig[f"DropoutNet_vs_{ref}"] = {
+                        "ndcg_delta": round(d, 4),
+                        "ndcg_delta_ci95": [round(lo, 4), round(hi, 4)],
+                        "ndcg_p": round(p, 4),
+                        "hit5_mcnemar_p": round(pm, 4),
+                    }
+                res["significance"] = sig
+                print("    -- significance --")
+                for name in ("Random", "Popularity", "DropoutNet"):
+                    s = sig[name]
+                    print(f"    {name:12s}  Hit@5 95%CI={s['hit5_wilson95']}  "
+                          f"NDCG@10 95%CI={s['ndcg_bootstrap95']}")
+                for ref in ("Popularity", "Random"):
+                    s = sig[f"DropoutNet_vs_{ref}"]
+                    print(f"    DropoutNet vs {ref}: d(NDCG)={s['ndcg_delta']:+.4f} "
+                          f"CI={s['ndcg_delta_ci95']} p={s['ndcg_p']}  "
+                          f"Hit@5 McNemar p={s['hit5_mcnemar_p']}")
 
     Path(args.output).parent.mkdir(parents=True, exist_ok=True)
     with open(args.output, "w") as f:
