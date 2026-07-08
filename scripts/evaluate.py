@@ -29,6 +29,7 @@ from src.models.two_tower import (
     build_model,
 )
 from src.utils.config import load_config
+from src.utils.device import get_device
 
 
 # ── Two-Tower model loading ──────────────────────────────────────────────────
@@ -44,7 +45,7 @@ def load_two_tower(
     Reconstructs the four-tower architecture from saved group names
     using build_model(), then loads the trained weights.
     """
-    device = torch.device("cpu")
+    device = get_device()
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
 
     category_vocab = ckpt["category_vocab"]

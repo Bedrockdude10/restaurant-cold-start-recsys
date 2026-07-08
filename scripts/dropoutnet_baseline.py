@@ -57,6 +57,7 @@ from src.utils.config import load_config  # noqa: E402
 from src.evaluation.significance import (  # noqa: E402
     wilson_ci, bootstrap_ci, paired_bootstrap_diff, mcnemar,
 )
+from src.utils.device import get_device  # noqa: E402
 
 SPLIT_FILES = {
     "warm": "test_warm.parquet",
@@ -173,7 +174,7 @@ def main():
     torch.manual_seed(seed)
     processed = ROOT / cfg["data"]["processed_dir"]
     splits = ROOT / cfg["data"]["splits_dir"]
-    device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+    device = get_device()
     print(f"device={device}  k={args.k}  epochs={args.epochs}  smoke={args.smoke}")
 
     # ── Load data (only the columns we need) ─────────────────────────────────

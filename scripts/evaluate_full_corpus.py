@@ -51,6 +51,7 @@ from src.data.pipeline import (  # noqa: E402
     prepare_features, augment_cold_start_users, build_loo_onboarding,
 )
 from src.utils.config import load_config  # noqa: E402
+from src.utils.device import get_device  # noqa: E402
 
 SPLIT_FILES = {
     "warm": "test_warm.parquet",
@@ -75,6 +76,7 @@ def load_two_tower(checkpoint_path):
         fusion=a.get("fusion", "mlp"),
     )
     model.load_state_dict(ckpt["model_state_dict"])
+    model.to(get_device())
     model.eval()
     return model, ckpt
 
