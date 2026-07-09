@@ -256,6 +256,15 @@ KEY_COMPARISONS: list[Comparison] = [
 # Evaluation splits, shared so reporting views agree on order.
 SPLITS: list[str] = ["warm", "cold_restaurant", "cold_user"]
 
+# Canonical seeds for the multi-seed study. The runner trains every experiment
+# once per seed and the summarizer aggregates (mean ± std) over exactly these,
+# so training-noise variance is reported consistently everywhere. Override on
+# the runner CLI (``--seeds``) for a cheaper/quicker sweep. The first seed is
+# the "primary" one, used for seed-invariant quantities (test cases, baselines,
+# full-corpus eval).
+SEEDS: list[int] = [42, 43, 44, 45, 46]
+PRIMARY_SEED: int = SEEDS[0]
+
 
 # ── Integrity check ───────────────────────────────────────────────────────────
 # Fail loudly at import time if the reporting metadata references an experiment
@@ -277,6 +286,10 @@ def _validate() -> None:
                 raise ValueError(
                     f"KEY_COMPARISONS entry {cmp.title!r} references unknown experiment {n!r}"
                 )
+    if not SEEDS:
+        raise ValueError("SEEDS must be non-empty")
+    if PRIMARY_SEED not in SEEDS:
+        raise ValueError(f"PRIMARY_SEED {PRIMARY_SEED} must be one of SEEDS {SEEDS}")
 
 
 _validate()

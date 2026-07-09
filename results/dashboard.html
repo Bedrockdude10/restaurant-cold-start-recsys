@@ -109,10 +109,6 @@ async function loadData() {
   for (const row of rows) {
     const name = row.experiment;
     if (!name) continue;
-    // DropoutNet is loaded separately from its own JSON below; skip its
-    // summary.csv row so it isn't double-counted or treated as an ablation.
-    if (name === 'dropoutnet') continue;
-    ORDER.push(name);
     const entry = { short: row.short_label || name, label: row.label || name };
     for (const s of SPLITS) {
       entry[s] = { TwoTower: { 'Hit@5': num(row[`${s}_hit5`]), 'NDCG@10': num(row[`${s}_ndcg10`]) } };
@@ -122,6 +118,10 @@ async function loadData() {
       if (pH!==null) entry[s].Popularity = { 'Hit@5': pH, 'NDCG@10': pN };
     }
     R[name] = entry;
+    // DropoutNet is a baseline, not an ablation: keep it out of ORDER (so it
+    // doesn't skew ablation views) but expose it as its own series. summary.csv
+    // is the single source \u2014 no separate JSON fetch.
+    if (name === 'dropoutnet') { DNET = 'dropoutnet'; } else { ORDER.push(name); }
   }
   // Global baselines: take from the first experiment that carries them (full_model).
   for (const name of ORDER) {
@@ -131,16 +131,6 @@ async function loadData() {
       }
     }
   }
-  // DropoutNet baseline (separate model, separate file) \u2014 optional.
-  try {
-    const dn = await (await fetch('./dropoutnet_results.json', {cache:'no-store'})).json();
-    const entry = { short: 'DropoutNet', label: 'DropoutNet (cold-start baseline)' };
-    for (const s of SPLITS) {
-      const m = (dn[s]||{}).DropoutNet || {};
-      entry[s] = { TwoTower: { 'Hit@5': m['Hit@5'] ?? null, 'NDCG@10': m['NDCG@10'] ?? null } };
-    }
-    R['dropoutnet'] = entry; DNET = 'dropoutnet';
-  } catch (e) { /* dropoutnet is optional */ }
 }
 
 // \u2500\u2500 Metric cards (computed from the loaded data) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500

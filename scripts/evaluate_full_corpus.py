@@ -130,6 +130,12 @@ def baseline_metrics(cases, train_counts, seed, hit_k, ndcg_k):
 
 
 def main():
+    # Output uses a non-ASCII glyph (→); make stdout robust on Windows cp1252.
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", default=str(ROOT / "configs/default.yaml"))
     ap.add_argument("--checkpoint", default=None, help="two-tower checkpoint (.pt)")

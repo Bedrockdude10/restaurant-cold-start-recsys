@@ -25,8 +25,18 @@ Validation: recomputes Random + Popularity on the regenerated test cases; the
 deterministic Popularity numbers must match the committed eval_results.json,
 proving the test cases are identical to the two-tower's.
 
+Multi-seed: the model (SVD + input-dropout net) is stochastic, and DropoutNet is
+a *learned* baseline that competes with the two-tower, so it gets the same
+variance treatment. It is trained once per seed (default: the canonical SEEDS
+from src.experiments), writing results/dropoutnet/seed_<N>/results.json. The
+evaluation seed — which fixes the test cases, the Random baseline, and cold-user
+leave-one-out onboarding — is held at the config seed for ALL model seeds, so the
+test set stays identical to the two-tower's and across DropoutNet seeds; only the
+trained model varies. scripts/summarize_ablation.py aggregates (mean ± std).
+
 Usage:
-    python scripts/dropoutnet_baseline.py                # full run
+    python scripts/dropoutnet_baseline.py                # sweep the canonical SEEDS
+    python scripts/dropoutnet_baseline.py --seeds 42     # single seed
     python scripts/dropoutnet_baseline.py --smoke        # fast smoke test
 """
 
@@ -34,6 +44,7 @@ import argparse
 import json
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -50,9 +61,9 @@ from src.data.features import PREFERENCE_FEATURES, encode_categories  # noqa: E4
 from src.data.pipeline import (  # noqa: E402
     prepare_features,
     build_eval_test_cases,
-    augment_cold_start_users,
     build_loo_onboarding,
 )
+from src.experiments import SEEDS  # noqa: E402  (single source of truth for the seed sweep)
 from src.utils.config import load_config  # noqa: E402
 from src.evaluation.significance import (  # noqa: E402
     wilson_ci, bootstrap_ci, paired_bootstrap_diff, mcnemar,
@@ -148,36 +159,48 @@ def build_item_content(restaurants, category_vocab):
     return content, dim
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--config", default=str(ROOT / "configs/default.yaml"))
-    ap.add_argument("--k", type=int, default=64, help="CF latent dim")
-    ap.add_argument("--epochs", type=int, default=15)
-    ap.add_argument("--batch-size", type=int, default=8192)
-    ap.add_argument("--lr", type=float, default=1e-3)
-    ap.add_argument("--n-negatives", type=int, default=99)
-    ap.add_argument("--rating-threshold", type=float, default=3.0)
-    ap.add_argument("--output", default=str(ROOT / "results/dropoutnet_results.json"))
-    ap.add_argument("--smoke", action="store_true", help="tiny/fast validation run")
-    ap.add_argument("--significance", action="store_true",
-                    help="report Wilson CIs (Hit@5), bootstrap CIs (NDCG@10), and paired tests")
-    ap.add_argument("--dump-percase", default=None,
-                    help="directory to save per-case hit5/ndcg arrays (.npz) for cross-model tests")
-    args = ap.parse_args()
+def score_matrix(user_emb_per_case, item_emb, bid_to_row, cand):
+    """Return (n_cases, n_cand) DropoutNet scores, chunked to bound memory."""
+    n = len(cand)
+    n_cand = len(cand[0])
+    cand_rows = np.array([[bid_to_row[b] for b in row] for row in cand], dtype=np.int64)
+    out = np.empty((n, n_cand), np.float32)
+    step = 4000
+    for s in range(0, n, step):
+        e = min(s + step, n)
+        ie = item_emb[cand_rows[s:e]]                 # (chunk, n_cand, d)
+        ue = user_emb_per_case[s:e][:, None, :]       # (chunk, 1, d)
+        out[s:e] = (ie * ue).sum(-1)
+    return out
 
-    if args.smoke:
-        args.k, args.epochs = 32, 2
 
-    cfg = load_config(args.config)
-    seed = cfg["training"]["seed"]
-    np.random.seed(seed)
-    torch.manual_seed(seed)
+@dataclass
+class Shared:
+    """Seed-independent inputs + frozen per-split eval artifacts.
+
+    Built once and reused for every model seed. Everything here is a function of
+    the data and the *evaluation* seed only, so it is identical across model
+    seeds (and matches the two-tower's frozen test cases).
+    """
+    restaurants: pd.DataFrame
+    item_content: dict
+    item_dim: int
+    pref_lookup: dict
+    uu: dict
+    ii: dict
+    rows: np.ndarray
+    cols: np.ndarray
+    R: csr_matrix
+    user_content_tr: np.ndarray
+    item_content_tr: np.ndarray
+    splits_data: dict  # split -> frozen cases/baselines/loo
+
+
+def load_shared(cfg, args, eval_seed: int) -> Shared:
+    """Load data and build all seed-invariant artifacts, including frozen test cases."""
     processed = ROOT / cfg["data"]["processed_dir"]
     splits = ROOT / cfg["data"]["splits_dir"]
-    device = get_device()
-    print(f"device={device}  k={args.k}  epochs={args.epochs}  smoke={args.smoke}")
 
-    # ── Load data (only the columns we need) ─────────────────────────────────
     t0 = time.time()
     restaurants = pd.read_parquet(processed / "restaurants.parquet")
     restaurants["business_id"] = restaurants["business_id"].astype(str)
@@ -190,7 +213,6 @@ def main():
     print(f"  loaded data in {time.time()-t0:.1f}s  "
           f"(train={len(train):,}, restaurants={len(restaurants):,})")
 
-    # ── Shared feature prep (city index, prefs, centroids, vocab) ────────────
     feats = prepare_features(processed, train, restaurants, set())
     category_vocab = feats.category_vocab
     item_content, item_dim = build_item_content(restaurants, category_vocab)
@@ -199,8 +221,7 @@ def main():
                                      feats.user_preferences.values)}
     train_counts = train.groupby("business_id").size().to_dict()
 
-    # ── Collaborative latent factors via truncated SVD ───────────────────────
-    t0 = time.time()
+    # Index maps + sparse interaction matrix (seed-independent).
     u_ids = train["user_id"].values
     i_ids = train["business_id"].values
     uu = {u: idx for idx, u in enumerate(pd.unique(u_ids))}
@@ -209,13 +230,7 @@ def main():
     cols = np.fromiter((ii[b] for b in i_ids), dtype=np.int32, count=len(i_ids))
     R = csr_matrix((np.ones(len(rows), np.float32), (rows, cols)),
                    shape=(len(uu), len(ii)))
-    svd = TruncatedSVD(n_components=args.k, random_state=seed)
-    U = svd.fit_transform(R).astype(np.float32)          # (n_users, k)
-    Vf = svd.components_.T.astype(np.float32)            # (n_items, k)
-    print(f"  SVD({args.k}) on {R.shape} in {time.time()-t0:.1f}s  "
-          f"(explained var={svd.explained_variance_ratio_.sum():.3f})")
 
-    # ── Aligned training tensors ─────────────────────────────────────────────
     n_u, n_i = len(uu), len(ii)
     user_content_tr = np.zeros((n_u, len(PREFERENCE_FEATURES)), np.float32)
     for u, idx in uu.items():
@@ -225,30 +240,84 @@ def main():
     for b, idx in ii.items():
         item_content_tr[idx] = item_content[b]
 
-    dev = device
+    # Frozen per-split eval artifacts — built once with the EVAL seed so the test
+    # cases, Random baseline, and cold-user LOO are identical across model seeds.
+    max_cases = 2000 if args.smoke else None
+    splits_data = {}
+    for split, fname in SPLIT_FILES.items():
+        path = splits / fname
+        if not path.exists():
+            continue
+        tr = pd.read_parquet(path)
+        tr["user_id"] = tr["user_id"].astype(str)
+        tr["business_id"] = tr["business_id"].astype(str)
+        all_excl = pd.concat([all_known, tr[["user_id", "business_id"]]], ignore_index=True)
+        test_cases = build_eval_test_cases(
+            tr, all_excl, feats, n_negatives=args.n_negatives,
+            rating_threshold=args.rating_threshold, max_cases=max_cases, seed=eval_seed,
+        )
+        if not test_cases:
+            continue
+        cand, user_ids, pos_col, n_cand = cases_to_arrays(test_cases)
+        uniq_bids = sorted({b for row in cand for b in row})
+        bid_row = {b: r for r, b in enumerate(uniq_bids)}
+        rand_scores = np.random.default_rng(eval_seed).random((len(cand), n_cand))
+        pop_scores = np.array(
+            [[float(train_counts.get(b, 0)) for b in row] for row in cand], dtype=np.float64
+        )
+        loo = None
+        if split == "cold_user":
+            loo = build_loo_onboarding(test_cases, tr, restaurants, feats, max_k=5, seed=eval_seed)
+            if loo is None:
+                loo = np.zeros((len(test_cases), len(PREFERENCE_FEATURES)), np.float32)
+            loo = loo.astype(np.float32)
+        splits_data[split] = dict(
+            n_cases=len(test_cases), cand=cand, user_ids=user_ids, pos_col=pos_col,
+            uniq_bids=uniq_bids, bid_row=bid_row, rand_scores=rand_scores,
+            pop_scores=pop_scores, loo=loo,
+        )
+        print(f"  [{split}] {len(test_cases):,} frozen test cases (eval seed {eval_seed})")
+
+    return Shared(restaurants, item_content, item_dim, pref_lookup, uu, ii,
+                  rows, cols, R, user_content_tr, item_content_tr, splits_data)
+
+
+def run_seed(shared: Shared, model_seed: int, args, device, seed_dir: Path) -> dict:
+    """Fit SVD + input-dropout nets at one model seed and evaluate every split."""
+    np.random.seed(model_seed)
+    torch.manual_seed(model_seed)
+    k, dev = args.k, device
+
+    # ── Collaborative latent factors via truncated SVD ───────────────────────
+    t0 = time.time()
+    svd = TruncatedSVD(n_components=k, random_state=model_seed)
+    U = svd.fit_transform(shared.R).astype(np.float32)   # (n_users, k)
+    Vf = svd.components_.T.astype(np.float32)            # (n_items, k)
+    print(f"    SVD({k}) on {shared.R.shape} in {time.time()-t0:.1f}s "
+          f"(explained var={svd.explained_variance_ratio_.sum():.3f})")
+
     U_t = torch.from_numpy(U).to(dev)
     V_t = torch.from_numpy(Vf).to(dev)
-    UC_t = torch.from_numpy(user_content_tr).to(dev)
-    IC_t = torch.from_numpy(item_content_tr).to(dev)
+    UC_t = torch.from_numpy(shared.user_content_tr).to(dev)
+    IC_t = torch.from_numpy(shared.item_content_tr).to(dev)
 
-    user_net = Transform(args.k + len(PREFERENCE_FEATURES)).to(dev)
-    item_net = Transform(args.k + item_dim).to(dev)
+    user_net = Transform(k + len(PREFERENCE_FEATURES)).to(dev)
+    item_net = Transform(k + shared.item_dim).to(dev)
     opt = torch.optim.Adam(
         list(user_net.parameters()) + list(item_net.parameters()),
         lr=args.lr, weight_decay=1e-5,
     )
     mse = nn.MSELoss()
 
-    # Observed positive pairs (u_row, i_row)
-    obs_u = torch.from_numpy(rows.astype(np.int64))
-    obs_i = torch.from_numpy(cols.astype(np.int64))
+    obs_u = torch.from_numpy(shared.rows.astype(np.int64))
+    obs_i = torch.from_numpy(shared.cols.astype(np.int64))
     n_obs = len(obs_u)
-    rng = np.random.default_rng(seed)
+    n_u, n_i = len(shared.uu), len(shared.ii)
+    rng = np.random.default_rng(model_seed)
 
     # ── Train (distill CF affinity with latent input-dropout) ────────────────
     t0 = time.time()
     for epoch in range(args.epochs):
-        # each epoch: all observed positives + equal # random pairs
         ru = torch.from_numpy(rng.integers(0, n_u, n_obs))
         ri = torch.from_numpy(rng.integers(0, n_i, n_obs))
         bu = torch.cat([obs_u, ru]); bi = torch.cat([obs_i, ri])
@@ -261,148 +330,94 @@ def main():
             i_idx = bi[s:s + args.batch_size].to(dev)
             Ul, Vl = U_t[u_idx], V_t[i_idx]
             target = (Ul * Vl).sum(1)                       # true CF affinity
-            # input dropout: per-sample mode 0=none,1=drop user,2=drop item
-            mode = torch.randint(0, 3, (len(u_idx),), device=dev)
+            mode = torch.randint(0, 3, (len(u_idx),), device=dev)  # 0=none,1=drop U,2=drop V
             Ul_in = Ul * (mode != 1).float().unsqueeze(1)
             Vl_in = Vl * (mode != 2).float().unsqueeze(1)
             phiU = user_net(torch.cat([Ul_in, UC_t[u_idx]], 1))
             phiI = item_net(torch.cat([Vl_in, IC_t[i_idx]], 1))
-            pred = (phiU * phiI).sum(1)
-            loss = mse(pred, target)
+            loss = mse((phiU * phiI).sum(1), target)
             opt.zero_grad(); loss.backward(); opt.step()
             total += loss.item(); nb += 1
-        print(f"  epoch {epoch+1}/{args.epochs}  mse={total/nb:.4f}  "
-              f"({time.time()-t0:.0f}s)")
+        print(f"    epoch {epoch+1}/{args.epochs}  mse={total/nb:.4f}  ({time.time()-t0:.0f}s)")
 
     user_net.eval(); item_net.eval()
 
-    # ── Embedding helpers ────────────────────────────────────────────────────
+    # ── Embedding helpers (bound to this seed's factors + nets) ──────────────
     @torch.no_grad()
     def embed_items(bids, zero_latent):
-        lat = np.zeros((len(bids), args.k), np.float32)
-        con = np.zeros((len(bids), item_dim), np.float32)
+        lat = np.zeros((len(bids), k), np.float32)
+        con = np.zeros((len(bids), shared.item_dim), np.float32)
         for j, b in enumerate(bids):
-            if not zero_latent and b in ii:
-                lat[j] = Vf[ii[b]]
-            con[j] = item_content.get(b, np.zeros(item_dim, np.float32))
+            if not zero_latent and b in shared.ii:
+                lat[j] = Vf[shared.ii[b]]
+            con[j] = shared.item_content.get(b, np.zeros(shared.item_dim, np.float32))
         x = torch.cat([torch.from_numpy(lat), torch.from_numpy(con)], 1).to(dev)
         return item_net(x).cpu().numpy()
 
     @torch.no_grad()
     def embed_users_warm(user_ids):
-        lat = np.zeros((len(user_ids), args.k), np.float32)
+        lat = np.zeros((len(user_ids), k), np.float32)
         con = np.zeros((len(user_ids), len(PREFERENCE_FEATURES)), np.float32)
         for j, u in enumerate(user_ids):
-            if u in uu:
-                lat[j] = U[uu[u]]
-            if u in pref_lookup:
-                con[j] = pref_lookup[u]
+            if u in shared.uu:
+                lat[j] = U[shared.uu[u]]
+            if u in shared.pref_lookup:
+                con[j] = shared.pref_lookup[u]
         x = torch.cat([torch.from_numpy(lat), torch.from_numpy(con)], 1).to(dev)
         return user_net(x).cpu().numpy()
 
     @torch.no_grad()
     def embed_users_cold(loo_content):  # latent zeroed
-        lat = np.zeros((len(loo_content), args.k), np.float32)
+        lat = np.zeros((len(loo_content), k), np.float32)
         x = torch.cat([torch.from_numpy(lat), torch.from_numpy(loo_content)], 1).to(dev)
         return user_net(x).cpu().numpy()
 
-    def score_matrix(user_emb_per_case, item_emb, bid_to_row, cand):
-        """Return (n_cases, n_cand) DropoutNet scores, chunked to bound memory."""
-        n = len(cand)
-        n_cand = len(cand[0])
-        cand_rows = np.array(
-            [[bid_to_row[b] for b in row] for row in cand], dtype=np.int64
-        )
-        out = np.empty((n, n_cand), np.float32)
-        step = 4000
-        for s in range(0, n, step):
-            e = min(s + step, n)
-            ie = item_emb[cand_rows[s:e]]                 # (chunk, n_cand, d)
-            ue = user_emb_per_case[s:e][:, None, :]       # (chunk, 1, d)
-            out[s:e] = (ie * ue).sum(-1)
-        return out
-
-    # ── Evaluate every split ─────────────────────────────────────────────────
+    # ── Evaluate every split on the frozen cases ─────────────────────────────
     results = {}
-    for split, fname in SPLIT_FILES.items():
-        path = splits / fname
-        if not path.exists():
-            continue
-        test_reviews = pd.read_parquet(path)
-        test_reviews["user_id"] = test_reviews["user_id"].astype(str)
-        test_reviews["business_id"] = test_reviews["business_id"].astype(str)
-        all_excl = pd.concat([all_known, test_reviews[["user_id", "business_id"]]],
-                             ignore_index=True)
-        max_cases = 2000 if args.smoke else None
-        test_cases = build_eval_test_cases(
-            test_reviews, all_excl, feats, n_negatives=args.n_negatives,
-            rating_threshold=args.rating_threshold, max_cases=max_cases, seed=seed,
-        )
-        if not test_cases:
-            continue
-        cand, user_ids, pos_col, n_cand = cases_to_arrays(test_cases)
-        uniq_bids = sorted({b for row in cand for b in row})
-        bid_row = {b: r for r, b in enumerate(uniq_bids)}
-
-        # baselines (validation) — same cases
-        rand_scores = np.random.default_rng(seed).random((len(cand), n_cand))
-        pop_scores = np.array(
-            [[float(train_counts.get(b, 0)) for b in row] for row in cand],
-            dtype=np.float64,
-        )
+    for split, sd in shared.splits_data.items():
+        cand, pos_col = sd["cand"], sd["pos_col"]
         res = {
-            "Random": metrics_from_scores(rand_scores, pos_col),
-            "Popularity": metrics_from_scores(pop_scores, pos_col),
+            "Random": metrics_from_scores(sd["rand_scores"], pos_col),
+            "Popularity": metrics_from_scores(sd["pop_scores"], pos_col),
         }
-
-        # DropoutNet
-        zero_item = (split == "cold_restaurant")
-        item_emb = embed_items(uniq_bids, zero_latent=zero_item)
+        item_emb = embed_items(sd["uniq_bids"], zero_latent=(split == "cold_restaurant"))
         if split == "cold_user":
-            loo = build_loo_onboarding(test_cases, test_reviews, restaurants, feats,
-                                       max_k=5, seed=seed)
-            if loo is None:
-                loo = np.zeros((len(test_cases), len(PREFERENCE_FEATURES)), np.float32)
-            user_emb = embed_users_cold(loo.astype(np.float32))
+            user_emb = embed_users_cold(sd["loo"])
         else:
-            uniq_users = list(dict.fromkeys(user_ids))
+            uniq_users = list(dict.fromkeys(sd["user_ids"]))
             emb = embed_users_warm(uniq_users)
-            umap = {u: k for k, u in enumerate(uniq_users)}
-            user_emb = emb[np.array([umap[u] for u in user_ids])]
-        dn_scores = score_matrix(user_emb, item_emb, bid_row, cand)
+            umap = {u: idx for idx, u in enumerate(uniq_users)}
+            user_emb = emb[np.array([umap[u] for u in sd["user_ids"]])]
+        dn_scores = score_matrix(user_emb, item_emb, sd["bid_row"], cand)
         res["DropoutNet"] = metrics_from_scores(dn_scores, pos_col)
 
-        results[split] = res
-        print(f"\n[{split}]  ({len(test_cases):,} cases)")
-        for name, m in res.items():
-            print(f"    {name:12s}  Hit@5={m['Hit@5']:.4f}  NDCG@10={m['NDCG@10']:.4f}")
+        m = res["DropoutNet"]
+        print(f"    [{split}] DropoutNet Hit@5={m['Hit@5']:.4f}  NDCG@10={m['NDCG@10']:.4f}")
 
         if args.significance or args.dump_percase:
             pc = {
-                "Random": percase_metrics(rand_scores, pos_col),
-                "Popularity": percase_metrics(pop_scores, pos_col),
+                "Random": percase_metrics(sd["rand_scores"], pos_col),
+                "Popularity": percase_metrics(sd["pop_scores"], pos_col),
                 "DropoutNet": percase_metrics(dn_scores, pos_col),
             }
             if args.dump_percase:
-                dd = Path(args.dump_percase)
-                dd.mkdir(parents=True, exist_ok=True)
                 np.savez(
-                    dd / f"percase_{split}.npz",
-                    **{f"{k}_hit5": v[0] for k, v in pc.items()},
-                    **{f"{k}_ndcg": v[1] for k, v in pc.items()},
+                    seed_dir / f"percase_{split}.npz",
+                    **{f"{name}_hit5": v[0] for name, v in pc.items()},
+                    **{f"{name}_ndcg": v[1] for name, v in pc.items()},
                 )
             if args.significance:
                 sig = {}
                 for name, (h, nd) in pc.items():
                     _, wlo, whi = wilson_ci(int(h.sum()), len(h))
-                    _, blo, bhi = bootstrap_ci(nd, seed=seed)
+                    _, blo, bhi = bootstrap_ci(nd, seed=model_seed)
                     sig[name] = {
                         "hit5_wilson95": [round(wlo, 4), round(whi, 4)],
                         "ndcg_bootstrap95": [round(blo, 4), round(bhi, 4)],
                     }
                 for ref in ("Popularity", "Random"):
                     d, lo, hi, p = paired_bootstrap_diff(
-                        pc["DropoutNet"][1], pc[ref][1], seed=seed)
+                        pc["DropoutNet"][1], pc[ref][1], seed=model_seed)
                     _, _, pm = mcnemar(
                         pc["DropoutNet"][0].astype(bool), pc[ref][0].astype(bool))
                     sig[f"DropoutNet_vs_{ref}"] = {
@@ -412,21 +427,60 @@ def main():
                         "hit5_mcnemar_p": round(pm, 4),
                     }
                 res["significance"] = sig
-                print("    -- significance --")
-                for name in ("Random", "Popularity", "DropoutNet"):
-                    s = sig[name]
-                    print(f"    {name:12s}  Hit@5 95%CI={s['hit5_wilson95']}  "
-                          f"NDCG@10 95%CI={s['ndcg_bootstrap95']}")
-                for ref in ("Popularity", "Random"):
-                    s = sig[f"DropoutNet_vs_{ref}"]
-                    print(f"    DropoutNet vs {ref}: d(NDCG)={s['ndcg_delta']:+.4f} "
-                          f"CI={s['ndcg_delta_ci95']} p={s['ndcg_p']}  "
-                          f"Hit@5 McNemar p={s['hit5_mcnemar_p']}")
 
-    Path(args.output).parent.mkdir(parents=True, exist_ok=True)
-    with open(args.output, "w") as f:
-        json.dump(results, f, indent=2)
-    print(f"\nSaved → {args.output}")
+        results[split] = res
+    return results
+
+
+def main():
+    # Output uses a non-ASCII glyph (→); make stdout robust on Windows cp1252.
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--config", default=str(ROOT / "configs/default.yaml"))
+    ap.add_argument("--k", type=int, default=64, help="CF latent dim")
+    ap.add_argument("--epochs", type=int, default=15)
+    ap.add_argument("--batch-size", type=int, default=8192)
+    ap.add_argument("--lr", type=float, default=1e-3)
+    ap.add_argument("--n-negatives", type=int, default=99)
+    ap.add_argument("--rating-threshold", type=float, default=3.0)
+    ap.add_argument("--seeds", type=int, nargs="+", default=SEEDS,
+                    help=f"Model seeds to train (default: {SEEDS})")
+    ap.add_argument("--out-dir", default=str(ROOT / "results/dropoutnet"),
+                    help="Output dir; each seed writes <out-dir>/seed_<N>/results.json")
+    ap.add_argument("--smoke", action="store_true", help="tiny/fast validation run")
+    ap.add_argument("--significance", action="store_true",
+                    help="report Wilson CIs (Hit@5), bootstrap CIs (NDCG@10), and paired tests")
+    ap.add_argument("--dump-percase", action="store_true",
+                    help="save per-case hit5/ndcg arrays (.npz) into each seed dir")
+    args = ap.parse_args()
+
+    if args.smoke:
+        args.k, args.epochs = 32, 2
+
+    cfg = load_config(args.config)
+    eval_seed = cfg["training"]["seed"]  # fixed across model seeds → frozen test cases
+    device = get_device()
+    print(f"device={device}  k={args.k}  epochs={args.epochs}  "
+          f"seeds={args.seeds}  eval_seed={eval_seed}  smoke={args.smoke}")
+
+    shared = load_shared(cfg, args, eval_seed)
+
+    out_dir = Path(args.out_dir)
+    for model_seed in args.seeds:
+        print(f"\n=== model seed {model_seed} ===")
+        seed_dir = out_dir / f"seed_{model_seed}"
+        seed_dir.mkdir(parents=True, exist_ok=True)
+        results = run_seed(shared, model_seed, args, device, seed_dir)
+        out_path = seed_dir / "results.json"
+        with open(out_path, "w") as f:
+            json.dump(results, f, indent=2)
+        print(f"    saved → {out_path}")
+
+    print(f"\nDone. {len(args.seeds)} seed(s) → {out_dir}")
 
 
 if __name__ == "__main__":
