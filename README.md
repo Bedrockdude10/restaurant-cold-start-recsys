@@ -25,13 +25,14 @@ Ranking is over one held-out positive plus **same-city** sampled negatives
 (~100 candidates; random floor ≈ 5%). Metrics are **Hit@5** and **NDCG@10**.
 Values are the best two-tower variant per split, compared against Random, Popularity, and
 **DropoutNet** (Volkovs et al., 2017) — a purpose-built cold-start baseline, run on the
-*same* frozen test cases (see [Baselines](#baselines)).
+*same* frozen test cases (see [Baselines](#baselines)). Two-tower/ablation numbers are
+means over 5 seeds (42–46).
 
 | Split | Cases | Random H@5 / N@10 | Popularity H@5 / N@10 | DropoutNet H@5 / N@10 | Two-Tower H@5 / N@10 |
 |-------|------:|:---:|:---:|:---:|:---:|
-| **Warm** | 80,057 | 5.4 / 5.0 | 27.2 / 23.2 | 18.0 / 15.7 | **28.7 / 24.3** |
-| **Cold-Restaurant** | 1,369 | 4.1 / 3.8 | 0.0 / 0.0 | **12.5 / 9.8** | 10.0 / 9.3 |
-| **Cold-User** | 1,732 | 6.2 / 5.4 | 27.1 / 22.8 | 11.8 / 10.6 | **31.8 / 29.0** |
+| **Warm** | 80,057 | 5.4 / 5.0 | 27.2 / 23.2 | 18.0 / 15.7 | **28.6 / 24.3** |
+| **Cold-Restaurant** | 1,369 | 4.1 / 3.8 | 0.0 / 0.0 | **12.5 / 9.8** | 10.5 / 9.1 |
+| **Cold-User** | 1,732 | 6.2 / 5.4 | 27.1 / 22.8 | 11.8 / 10.6 | **31.8 / 28.6** |
 
 *(all numbers in %; best per split in bold)*
 
@@ -39,9 +40,9 @@ Values are the best two-tower variant per split, compared against Random, Popula
 
 - **Cold restaurants — content wins, and so does DropoutNet.** Popularity is structurally
   **0** (held-out restaurants have no training reviews). DropoutNet, a method built for cold
-  start, is the *strongest* here (12.5 vs. 10.0 Hit@5); our two-tower is competitive but does
+  start, is the *strongest* here (12.5 vs. 10.5 Hit@5); our two-tower is competitive but does
   **not** beat it. Content is the decisive signal for cold items.
-- **Cold users — context wins, decisively.** The two-tower reaches 29.0 NDCG@10 vs.
+- **Cold users — context wins, decisively.** The two-tower reaches 28.6 NDCG@10 vs.
   Popularity's 22.8 and DropoutNet's 10.6. DropoutNet, lacking situational features, falls
   below even Popularity — the gap the context sub-towers close, and this model's distinctive
   contribution.
@@ -161,23 +162,24 @@ architecture changes. Twelve experiments in total.
 
 ### Full results
 
-All values %. Best per column in **bold**. Baselines (constant): Warm 5.4/5.0 (Random),
-27.2/23.2 (Pop); Cold-Rest 4.1/3.8, 0.0/0.0; Cold-User 6.2/5.4, 27.1/22.8.
+All values %. Best per column in **bold**. Two-tower cells are means over 5 seeds (42–46);
+see [`summary.csv`](results/ablation/summary.csv) for per-seed std. Baselines (constant):
+Warm 5.4/5.0 (Random), 27.2/23.2 (Pop); Cold-Rest 4.1/3.8, 0.0/0.0; Cold-User 6.2/5.4, 27.1/22.8.
 
 | Experiment | Warm H@5 | Warm N@10 | ColdRest H@5 | ColdRest N@10 | ColdUser H@5 | ColdUser N@10 |
 |------------|---------:|----------:|-------------:|--------------:|-------------:|--------------:|
-| full_model | 26.5 | 22.6 | 9.0 | **9.3** | 29.1 | 24.8 |
-| no_user_context | 26.5 | 22.6 | 7.0 | 6.8 | 24.9 | 21.7 |
-| content_x_content | 25.0 | 21.4 | 5.0 | 4.7 | 24.2 | 20.7 |
-| no_user_content | 27.2 | 23.1 | 3.9 | 3.6 | 31.5 | **29.0** |
-| context_x_context | 27.5 | 23.5 | 2.5 | 2.5 | **31.8** | 29.0 |
-| checkin_replaces_dow | 28.0 | 23.8 | **10.0** | 8.5 | 31.8 | 27.0 |
-| gated_fusion | 27.7 | 23.5 | 7.7 | 7.2 | 29.1 | 25.4 |
-| gated_fusion_with_checkin | **28.7** | 24.3 | 8.8 | 7.5 | 31.5 | 26.6 |
-| no_onboarding | 27.7 | 23.4 | 7.0 | 7.1 | 29.2 | 25.7 |
-| no_preferences | 27.9 | 23.6 | 3.9 | 3.7 | **31.8** | 28.9 |
-| no_temporal | 26.1 | 22.4 | 6.7 | 6.1 | 28.2 | 24.3 |
-| with_user_checkin | 28.6 | **24.3** | 9.1 | 8.0 | 31.4 | 26.7 |
+| full_model | 27.2 | 23.1 | 8.1 | 7.7 | 29.2 | 25.6 |
+| no_user_context | 26.4 | 22.4 | 6.7 | 6.2 | 25.1 | 21.5 |
+| content_x_content | 25.0 | 21.5 | 5.5 | 5.2 | 23.8 | 20.7 |
+| no_user_content | 27.5 | 23.3 | 3.2 | 3.1 | **31.8** | **28.6** |
+| context_x_context | 27.6 | 23.5 | 3.0 | 2.9 | 31.7 | **28.6** |
+| checkin_replaces_dow | 28.5 | **24.3** | 9.8 | 8.7 | 30.9 | 26.7 |
+| gated_fusion | 27.5 | 23.4 | 8.1 | 7.1 | 29.3 | 25.5 |
+| gated_fusion_with_checkin | **28.6** | **24.3** | 9.6 | 8.4 | 31.3 | 26.4 |
+| no_onboarding | 27.3 | 23.1 | 8.4 | 7.8 | 29.2 | 25.8 |
+| no_preferences | 27.8 | 23.6 | 4.0 | 3.7 | 31.7 | 28.3 |
+| no_temporal | 26.2 | 22.4 | 6.7 | 6.5 | 29.0 | 25.1 |
+| with_user_checkin | 28.5 | 24.2 | **10.5** | **9.1** | 31.4 | 26.7 |
 
 Reproduced from [`results/ablation/summary.csv`](results/ablation/summary.csv). Per-experiment
 metrics are under [`results/ablation/<experiment>/eval_results.json`](results/ablation/); an
@@ -185,17 +187,22 @@ interactive summary is in [`results/dashboard.html`](results/dashboard.html).
 
 ### Findings
 - **Content is essential for cold restaurants.** Dropping user content collapses
-  cold-restaurant NDCG@10 from 9.3 → 3.6; context alone is nearly useless (2.5).
+  cold-restaurant NDCG@10 from 7.7 → 3.1; context alone is nearly useless (2.9).
 - **Context drives cold users.** `context_x_context` (no content on either side) *beats*
-  the full model on cold users (29.0 vs 24.8 NDCG@10) — sparse onboarding is noisier than
+  the full model on cold users (28.6 vs 25.6 NDCG@10) — sparse onboarding is noisier than
   situational signal.
 - **Check-in–matched visit times help broadly.** `with_user_checkin` lifts warm NDCG@10
-  22.6 → 24.3 and cold-user 24.8 → 26.7; `checkin_replaces_dow` gives the best
-  cold-restaurant Hit@5 (10.0).
-- **Gated fusion helps warm/cold-user but hurts cold-restaurant** — it learns
-  training-restaurant-specific interactions that don't transfer to unseen restaurants.
+  23.1 → 24.2 and cold-user 25.6 → 26.7, and gives the best cold-restaurant Hit@5 (10.5);
+  `checkin_replaces_dow` and `gated_fusion_with_checkin` are close behind (9.8 / 9.6).
+- **Gated fusion is roughly neutral, with a small cold-restaurant cost.** On its own it
+  barely moves warm/cold-user versus the full model (27.5/29.3 vs 27.2/29.2 Hit@5); its
+  clearest effect is a modest cold-restaurant drop when paired with check-in (9.6 vs 10.5
+  Hit@5), consistent with gating learning training-restaurant-specific interactions that
+  transfer less to unseen restaurants.
 - **Onboarding vs. preferences are asymmetric.** Dropping preferences hurts cold
-  restaurants (9.3 → 3.7) but *improves* cold users (24.8 → 28.9).
+  restaurants (7.7 → 3.7) but *improves* cold users (25.6 → 28.3); dropping onboarding
+  leaves cold-restaurant essentially unchanged (7.7 → 7.8), so preferences carry the
+  cold-restaurant signal.
 
 ---
 
