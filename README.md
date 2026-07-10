@@ -139,20 +139,21 @@ models and epochs for fair comparison; training negatives are resampled every ep
 ## Ablation study
 
 We vary which **feature groups** are active on each tower, then test targeted feature and
-architecture changes. Twelve experiments in total.
+architecture changes. Thirteen experiments in total.
 
 ### 1. Feature-group grid (which half of each tower is active)
 
 |                     | Restaurant: All | Restaurant: Content-only | Restaurant: Context-only |
 |---------------------|-----------------|--------------------------|--------------------------|
-| **User: All**       | `full_model`    | `no_temporal`            | *(not run)*              |
+| **User: All**       | `full_model`    | `no_temporal`            | `no_restaurant_content`  |
 | **User: Content**   | `no_user_context` | `content_x_content`    | *(not run)*              |
 | **User: Context**   | `no_user_content` | *(not run)*            | `context_x_context`      |
 
-> The three "restaurant context-only" cells other than `context_x_context` were not run;
-> they are noted as future work. (An earlier draft of this table labeled cells
-> `no_restaurant_context` / `no_restaurant_content`; the experiment actually run is
-> `no_temporal`, which removes the restaurant context sub-tower.)
+> `no_temporal` and `no_restaurant_content` are the two restaurant-side single-tower drops
+> (restaurant content-only and context-only, respectively). Two grid cells remain unrun —
+> restaurant context-only × user content, and restaurant content-only × user context — and
+> are noted as future work. `context_x_context` keeps the restaurant content sub-tower, which
+> the architecture requires, so it is user-context-only paired with a full restaurant tower.
 
 ### 2. User-content sub-ablations
 `no_onboarding` (preferences only) and `no_preferences` (onboarding only).
@@ -179,6 +180,7 @@ Warm 5.4/5.0 (Random), 27.2/23.2 (Pop); Cold-Rest 4.1/3.8, 0.0/0.0; Cold-User 6.
 | no_onboarding | 27.3 | 23.1 | 8.4 | 7.8 | 29.2 | 25.8 |
 | no_preferences | 27.8 | 23.6 | 4.0 | 3.7 | 31.7 | 28.3 |
 | no_temporal | 26.2 | 22.4 | 6.7 | 6.5 | 29.0 | 25.1 |
+| no_restaurant_content | 25.5 | 21.7 | 8.6 | 7.8 | 30.0 | 26.2 |
 | with_user_checkin | 28.5 | 24.2 | **10.5** | **9.1** | 31.4 | 26.7 |
 
 Reproduced from [`results/ablation/summary.csv`](results/ablation/summary.csv). Per-experiment
@@ -203,6 +205,11 @@ interactive summary is in [`results/dashboard.html`](results/dashboard.html).
   restaurants (7.7 → 3.7) but *improves* cold users (25.6 → 28.3); dropping onboarding
   leaves cold-restaurant essentially unchanged (7.7 → 7.8), so preferences carry the
   cold-restaurant signal.
+- **On the restaurant side, temporal context — not categorical content — carries the
+  cold-restaurant signal.** Dropping restaurant content (`no_restaurant_content`) barely
+  moves cold-restaurant (8.1 → 8.6 Hit@5), whereas dropping the temporal check-in profile
+  (`no_temporal`) drops it to 6.7. The decisive *content* signal for cold restaurants is on
+  the user side (preferences), not the restaurant's own categories/price/attributes.
 
 ---
 
