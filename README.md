@@ -114,8 +114,10 @@ Dataset after filtering: **1,293,531** train reviews · **58,801** users ·
 
 For each test interaction (user rated restaurant *X* with stars ≥ threshold):
 sample *N* negatives **from the same city**, score the 1 positive + *N* negatives with
-each model/baseline, rank, and compute Hit@5 / NDCG@10. Test cases are **frozen** across
-models and epochs for fair comparison; training negatives are resampled every epoch.
+each model/baseline, rank, and compute a metric suite — **Hit@k** and **NDCG@k** at
+k ∈ {5, 10, 20} plus **MRR** (cutoffs configurable in `configs/default.yaml`). Hit@5 /
+NDCG@10 are the headline metrics reported in the tables above. Test cases are **frozen**
+across models and epochs for fair comparison; training negatives are resampled every epoch.
 
 - **Cold-user leave-one-out onboarding** — a cold user's onboarding vector is built from
   their *test* reviews *excluding* the one containing the ground-truth positive, so the
@@ -210,6 +212,28 @@ interactive summary is in [`results/dashboard.html`](results/dashboard.html).
   moves cold-restaurant (8.1 → 8.6 Hit@5), whereas dropping the temporal check-in profile
   (`no_temporal`) drops it to 6.7. The decisive *content* signal for cold restaurants is on
   the user side (preferences), not the restaurant's own categories/price/attributes.
+  *(Caveat: the restaurant-side cold-restaurant differences are within training-seed noise —
+  not significant after correction; see below.)*
+
+### Statistical significance
+
+Because the study is run over 5 seeds, we test whether each headline `full_model`-vs-ablation
+difference exceeds training-seed noise (`scripts/significance.py`, paired *t*-test where
+per-seed runs exist for both sides, else Welch two-sample from `summary.csv`; Holm–Bonferroni
+correction across the family of tests). The full table is
+[`results/ablation/significance.md`](results/ablation/significance.md). Headline conclusions:
+
+- **User-side effects are robust.** Removing user context (Cold-User Hit@5 Δ +0.042,
+  p<0.01), all context (`content_x_content`, +0.054), or user content on cold *restaurants*
+  (+0.049) are all significant after correction.
+- **Warm gains from content/context are small but significant** (e.g. `content_x_content`
+  Δ +0.022 Hit@5, p<0.001) — the full model reliably edges pure content matching.
+- **Restaurant-side cold-restaurant effects are *not* significant** at the seed level
+  (`no_temporal` Δ +0.014, p_Holm≈0.43; `no_restaurant_content` Δ −0.005, n.s.). The
+  cold-restaurant split (1,369 cases) is noisy; distinguishing these needs the per-case
+  significance protocol (McNemar / paired bootstrap over individual test cases, as in
+  `scripts/dropoutnet_baseline.py --significance`), which for the two-tower requires logging
+  per-case outcomes during eval — a straightforward extension left as future work.
 
 ---
 
@@ -234,6 +258,7 @@ python scripts/create_splits.py      --config configs/default.yaml
 python scripts/train.py              --data-dir data --epochs 50
 python scripts/run_ablation.py       --data-dir data --epochs 50
 python scripts/summarize_ablation.py --results-dir results/ablation --csv results/ablation/summary.csv
+python scripts/significance.py       --results-dir results/ablation --csv results/ablation/significance.csv --md results/ablation/significance.md
 ```
 
 ---

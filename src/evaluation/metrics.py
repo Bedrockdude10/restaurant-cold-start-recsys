@@ -1,8 +1,15 @@
 """Evaluation metrics and batched model scoring for recommendation quality.
 
 Primary metrics:
-    - Hit@5: Binary — does a relevant item appear in top 5?
-    - NDCG@10: Ranking quality — position-sensitive relevance scoring
+    - Hit@k: Binary — does a relevant item appear in the top k?
+    - NDCG@k: Ranking quality — position-sensitive relevance scoring
+    - MRR: Mean reciprocal rank of the first relevant item
+
+``evaluate_recommendations`` and ``score_test_cases`` accept ``hit_ks`` / ``ndcg_ks``
+lists to report a metric suite over several cutoffs (e.g. @5/@10/@20) plus MRR in a
+single pass. The legacy ``hit_k`` / ``ndcg_k`` scalars still work and the
+``Hit@{hit_k}`` / ``NDCG@{ndcg_k}`` keys are always present, so existing consumers
+(summary tables, dashboards, saved eval_results.json) keep reading the same fields.
 
 Batched scoring:
     score_test_cases() builds a SINGLE flat feature dict per batch and
@@ -41,19 +48,53 @@ def ndcg_at_k(ranked_items: list[str], relevant_items: set[str], k: int = 10) ->
     return dcg / idcg
 
 
+def reciprocal_rank(ranked_items: list[str], relevant_items: set[str]) -> float:
+    """Reciprocal rank (1/position, 1-indexed) of the first relevant item; 0 if none."""
+    for i, item in enumerate(ranked_items):
+        if item in relevant_items:
+            return 1.0 / (i + 1)
+    return 0.0
+
+
+def _resolve_ks(hit_k: int, ndcg_k: int,
+                hit_ks: list[int] | None, ndcg_ks: list[int] | None
+                ) -> tuple[list[int], list[int]]:
+    """Cutoff lists that always include the legacy scalar cutoffs."""
+    hks = sorted(set(hit_ks) | {hit_k}) if hit_ks else [hit_k]
+    nks = sorted(set(ndcg_ks) | {ndcg_k}) if ndcg_ks else [ndcg_k]
+    return hks, nks
+
+
 def evaluate_recommendations(
     all_ranked: list[list[str]],
     all_relevant: list[set[str]],
     hit_k: int = 5,
     ndcg_k: int = 10,
+    hit_ks: list[int] | None = None,
+    ndcg_ks: list[int] | None = None,
+    include_mrr: bool = True,
 ) -> dict[str, float]:
-    hits = [hit_at_k(r, rel, hit_k) for r, rel in zip(all_ranked, all_relevant)]
-    ndcgs = [ndcg_at_k(r, rel, ndcg_k) for r, rel in zip(all_ranked, all_relevant)]
-    return {
-        f"Hit@{hit_k}": float(np.mean(hits)),
-        f"NDCG@{ndcg_k}": float(np.mean(ndcgs)),
-        "n_cases": len(hits),
-    }
+    """Aggregate Hit@k / NDCG@k (over one or more cutoffs) and MRR.
+
+    ``Hit@{hit_k}`` and ``NDCG@{ndcg_k}`` are always present. Pass ``hit_ks`` /
+    ``ndcg_ks`` to add extra cutoffs (e.g. ``[5, 10, 20]``).
+    """
+    hks, nks = _resolve_ks(hit_k, ndcg_k, hit_ks, ndcg_ks)
+    out: dict[str, float] = {}
+    for k in hks:
+        out[f"Hit@{k}"] = float(np.mean([hit_at_k(r, rel, k)
+                                         for r, rel in zip(all_ranked, all_relevant)])) \
+            if all_ranked else 0.0
+    for k in nks:
+        out[f"NDCG@{k}"] = float(np.mean([ndcg_at_k(r, rel, k)
+                                          for r, rel in zip(all_ranked, all_relevant)])) \
+            if all_ranked else 0.0
+    if include_mrr:
+        out["MRR"] = float(np.mean([reciprocal_rank(r, rel)
+                                    for r, rel in zip(all_ranked, all_relevant)])) \
+            if all_ranked else 0.0
+    out["n_cases"] = len(all_ranked)
+    return out
 
 
 # ── Batched model scoring ────────────────────────────────────────────────────
@@ -74,6 +115,9 @@ def score_test_cases(
     cold_restaurant_ids: set[str] | None = None,
     hit_k: int = 5,
     ndcg_k: int = 10,
+    hit_ks: list[int] | None = None,
+    ndcg_ks: list[int] | None = None,
+    include_mrr: bool = True,
     batch_size: int = 4096,
     # Backward-compatible kwargs (ignored)
     user_enabled_keys: set[str] | None = None,
@@ -99,8 +143,15 @@ def score_test_cases(
     model.eval()
     device = next(model.parameters()).device
 
+    hks, nks = _resolve_ks(hit_k, ndcg_k, hit_ks, ndcg_ks)
+
     if not test_cases:
-        return {f"Hit@{hit_k}": 0.0, f"NDCG@{ndcg_k}": 0.0, "n_cases": 0}
+        empty = {f"Hit@{k}": 0.0 for k in hks}
+        empty.update({f"NDCG@{k}": 0.0 for k in nks})
+        if include_mrr:
+            empty["MRR"] = 0.0
+        empty["n_cases"] = 0
+        return empty
 
     # ── Phase 1a: Flatten all (case, candidate) pairs ────────────────────
     case_sizes = [len(c.candidate_ids) for c in test_cases]
@@ -222,18 +273,22 @@ def score_test_cases(
         all_scores[batch_start:batch_end] = scores.cpu()
 
     # ── Phase 3: Partition scores, compute metrics ───────────────────────
-    all_hits = []
-    all_ndcgs = []
+    per: dict[str, list[float]] = {f"Hit@{k}": [] for k in hks}
+    per.update({f"NDCG@{k}": [] for k in nks})
+    if include_mrr:
+        per["MRR"] = []
 
     for case, (start, end) in zip(test_cases, case_offsets):
         case_scores = all_scores[start:end]
         ranked_idx = case_scores.argsort(descending=True).numpy()
         ranked_bids = [case.candidate_ids[i] for i in ranked_idx]
-        all_hits.append(hit_at_k(ranked_bids, case.relevant_ids, k=hit_k))
-        all_ndcgs.append(ndcg_at_k(ranked_bids, case.relevant_ids, k=ndcg_k))
+        for k in hks:
+            per[f"Hit@{k}"].append(hit_at_k(ranked_bids, case.relevant_ids, k=k))
+        for k in nks:
+            per[f"NDCG@{k}"].append(ndcg_at_k(ranked_bids, case.relevant_ids, k=k))
+        if include_mrr:
+            per["MRR"].append(reciprocal_rank(ranked_bids, case.relevant_ids))
 
-    return {
-        f"Hit@{hit_k}": float(np.mean(all_hits)),
-        f"NDCG@{ndcg_k}": float(np.mean(all_ndcgs)),
-        "n_cases": len(all_hits),
-    }
+    out = {name: float(np.mean(vals)) for name, vals in per.items()}
+    out["n_cases"] = len(test_cases)
+    return out

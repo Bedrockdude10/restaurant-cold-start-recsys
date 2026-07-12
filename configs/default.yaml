@@ -42,8 +42,10 @@ training:
   seed: 42
 
 evaluation:
-  hit_k: 5
+  hit_k: 5                        # legacy scalar cutoffs (kept as the headline metrics)
   ndcg_k: 10
+  hit_ks: [5, 10, 20]            # metric suite reported per run (Hit@k over these cutoffs)
+  ndcg_ks: [5, 10, 20]          # NDCG@k over these cutoffs; MRR is always reported too
   num_cold_start_users: 1000     # Number of users to simulate as cold start
   num_cold_start_businesses: 500  # Number of businesses to mask
 

@@ -77,6 +77,8 @@ def evaluate_model(
     test_cases: list[TestCase],
     hit_k: int = 5,
     ndcg_k: int = 10,
+    hit_ks: list[int] | None = None,
+    ndcg_ks: list[int] | None = None,
 ) -> dict[str, float | int]:
     all_ranked = []
     all_relevant = []
@@ -86,7 +88,9 @@ def evaluate_model(
         ranked = sorted(case.candidate_ids, key=lambda bid: scores.get(bid, 0.0), reverse=True)
         all_ranked.append(ranked)
         all_relevant.append(case.relevant_ids)
-    return evaluate_recommendations(all_ranked, all_relevant, hit_k, ndcg_k)
+    return evaluate_recommendations(
+        all_ranked, all_relevant, hit_k, ndcg_k, hit_ks=hit_ks, ndcg_ks=ndcg_ks,
+    )
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────
@@ -108,12 +112,21 @@ def main():
     parser.add_argument("--rating-threshold", type=float, default=3.0)
     parser.add_argument("--hit-k", type=int, default=5)
     parser.add_argument("--ndcg-k", type=int, default=10)
+    parser.add_argument("--hit-ks", type=int, nargs="+", default=None,
+                        help="Extra Hit@k cutoffs to report (default: from config, else --hit-k)")
+    parser.add_argument("--ndcg-ks", type=int, nargs="+", default=None,
+                        help="Extra NDCG@k cutoffs to report (default: from config, else --ndcg-k)")
     args = parser.parse_args()
 
     config = load_config(args.config)
     splits_dir = Path(config["data"]["splits_dir"])
     processed_dir = Path(config["data"]["processed_dir"])
     seed = config["training"]["seed"]
+
+    # Metric cutoffs: CLI overrides config; both fall back to the scalar --hit-k/--ndcg-k.
+    eval_cfg = config.get("evaluation", {})
+    hit_ks = args.hit_ks or eval_cfg.get("hit_ks")
+    ndcg_ks = args.ndcg_ks or eval_cfg.get("ndcg_ks")
 
     # ── Load data ────────────────────────────────────────────────────────
     print("Loading data...")
@@ -206,7 +219,8 @@ def main():
         results[split_name] = {}
         for model_name, model in models.items():
             t0 = time.time()
-            metrics = evaluate_model(model, test_cases, hit_k=args.hit_k, ndcg_k=args.ndcg_k)
+            metrics = evaluate_model(model, test_cases, hit_k=args.hit_k, ndcg_k=args.ndcg_k,
+                                     hit_ks=hit_ks, ndcg_ks=ndcg_ks)
             elapsed = time.time() - t0
             results[split_name][model_name] = metrics
             print(f"  {model_name:20s}  "
@@ -245,6 +259,8 @@ def main():
                 cold_restaurant_ids=split_cold_ids,
                 hit_k=args.hit_k,
                 ndcg_k=args.ndcg_k,
+                hit_ks=hit_ks,
+                ndcg_ks=ndcg_ks,
             )
             elapsed = time.time() - t0
 
